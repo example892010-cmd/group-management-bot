@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: aniflix-group-management-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: BOT_TOKEN
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: MONGODB_URL
+        sync: false
+      - key: DB_NAME
+        value: aniflix_group_bot
+      - key: BOT_CHANNEL_USERNAME
+        value: '@ANIFLIXANIMETAMIL'
