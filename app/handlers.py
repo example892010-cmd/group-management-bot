@@ -33,7 +33,7 @@ from .keyboards import (
     reply_menu,
 )
 from .moderation import FloodGuard
-from .storage import SQLiteStore
+from .storage import MongoStore
 
 router = Router(name="aniflix-group-bot")
 
@@ -81,11 +81,11 @@ def muted_permissions() -> ChatPermissions:
     )
 
 
-async def is_panel_admin(user_id: int, store: SQLiteStore, settings: Settings) -> bool:
+async def is_panel_admin(user_id: int, store: MongoStore, settings: Settings) -> bool:
     return await store.is_authorized_admin(user_id, settings.owner_ids)
 
 
-async def is_chat_admin(message: Message, store: SQLiteStore, settings: Settings) -> bool:
+async def is_chat_admin(message: Message, store: MongoStore, settings: Settings) -> bool:
     if message.from_user and await is_panel_admin(message.from_user.id, store, settings):
         return True
     if not message.from_user:
@@ -108,7 +108,7 @@ async def my_id_command(message: Message) -> None:
 
 
 @router.message(Command("start"), StateFilter(None))
-async def start_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+async def start_command(message: Message, store: MongoStore, settings: Settings) -> None:
     if message.chat.type == ChatType.PRIVATE:
         if message.from_user and await is_panel_admin(message.from_user.id, store, settings):
             await message.answer("🍥 Welcome to ANIFLIX Group Bot.\n\nUse /admin to open the control panel.")
@@ -117,7 +117,7 @@ async def start_command(message: Message, store: SQLiteStore, settings: Settings
 
 
 @router.message(Command("admin"), StateFilter(None))
-async def admin_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+async def admin_command(message: Message, store: MongoStore, settings: Settings) -> None:
     if message.chat.type != ChatType.PRIVATE:
         await message.answer("Open the bot's private chat and send /admin to access the control panel.")
         return
@@ -133,7 +133,7 @@ async def cancel_admin_action(message: Message, state: FSMContext) -> None:
     await message.answer("✅ Action cancelled.")
 
 
-async def _authorized_callback(callback: CallbackQuery, store: SQLiteStore, settings: Settings) -> bool:
+async def _authorized_callback(callback: CallbackQuery, store: MongoStore, settings: Settings) -> bool:
     if callback.from_user and await is_panel_admin(callback.from_user.id, store, settings):
         return True
     await callback.answer("You are not authorized.", show_alert=True)
@@ -141,7 +141,7 @@ async def _authorized_callback(callback: CallbackQuery, store: SQLiteStore, sett
 
 
 @router.callback_query(F.data.startswith("panel:"))
-async def panel_navigation(callback: CallbackQuery, state: FSMContext, store: SQLiteStore, settings: Settings) -> None:
+async def panel_navigation(callback: CallbackQuery, state: FSMContext, store: MongoStore, settings: Settings) -> None:
     if not await _authorized_callback(callback, store, settings):
         return
     await state.clear()
@@ -189,7 +189,7 @@ async def panel_navigation(callback: CallbackQuery, state: FSMContext, store: SQ
 
 
 @router.callback_query(F.data.startswith("anime:"))
-async def anime_actions(callback: CallbackQuery, state: FSMContext, store: SQLiteStore, settings: Settings) -> None:
+async def anime_actions(callback: CallbackQuery, state: FSMContext, store: MongoStore, settings: Settings) -> None:
     if not await _authorized_callback(callback, store, settings):
         return
     _, action, status = callback.data.split(":")
@@ -222,7 +222,7 @@ async def anime_actions(callback: CallbackQuery, state: FSMContext, store: SQLit
 
 
 @router.message(AdminFlow.waiting_titles, F.chat.type == ChatType.PRIVATE)
-async def receive_title_lines(message: Message, state: FSMContext, store: SQLiteStore, settings: Settings) -> None:
+async def receive_title_lines(message: Message, state: FSMContext, store: MongoStore, settings: Settings) -> None:
     if not message.from_user or not await is_panel_admin(message.from_user.id, store, settings):
         await state.clear()
         return
@@ -261,7 +261,7 @@ async def receive_title_lines(message: Message, state: FSMContext, store: SQLite
 
 
 @router.message(AdminFlow.waiting_txt, F.chat.type == ChatType.PRIVATE, F.document)
-async def receive_txt_file(message: Message, state: FSMContext, store: SQLiteStore, settings: Settings) -> None:
+async def receive_txt_file(message: Message, state: FSMContext, store: MongoStore, settings: Settings) -> None:
     if not message.from_user or not await is_panel_admin(message.from_user.id, store, settings):
         await state.clear()
         return
@@ -303,7 +303,7 @@ async def waiting_for_txt_document(message: Message) -> None:
 
 
 @router.callback_query(F.data.startswith("reply:add:"))
-async def add_reply_start(callback: CallbackQuery, state: FSMContext, store: SQLiteStore, settings: Settings) -> None:
+async def add_reply_start(callback: CallbackQuery, state: FSMContext, store: MongoStore, settings: Settings) -> None:
     if not await _authorized_callback(callback, store, settings):
         return
     category = callback.data.split(":", 2)[2]
@@ -314,7 +314,7 @@ async def add_reply_start(callback: CallbackQuery, state: FSMContext, store: SQL
 
 
 @router.message(AdminFlow.waiting_custom_reply, F.chat.type == ChatType.PRIVATE)
-async def receive_custom_replies(message: Message, state: FSMContext, store: SQLiteStore, settings: Settings) -> None:
+async def receive_custom_replies(message: Message, state: FSMContext, store: MongoStore, settings: Settings) -> None:
     if not message.from_user or not await is_panel_admin(message.from_user.id, store, settings):
         await state.clear()
         return
@@ -333,7 +333,7 @@ async def receive_custom_replies(message: Message, state: FSMContext, store: SQL
 
 
 @router.callback_query(F.data == "reply:remove")
-async def remove_reply_start(callback: CallbackQuery, state: FSMContext, store: SQLiteStore, settings: Settings) -> None:
+async def remove_reply_start(callback: CallbackQuery, state: FSMContext, store: MongoStore, settings: Settings) -> None:
     if not await _authorized_callback(callback, store, settings):
         return
     await state.set_state(AdminFlow.waiting_remove_reply)
@@ -342,7 +342,7 @@ async def remove_reply_start(callback: CallbackQuery, state: FSMContext, store: 
 
 
 @router.message(AdminFlow.waiting_remove_reply, F.chat.type == ChatType.PRIVATE)
-async def receive_remove_reply(message: Message, state: FSMContext, store: SQLiteStore, settings: Settings) -> None:
+async def receive_remove_reply(message: Message, state: FSMContext, store: MongoStore, settings: Settings) -> None:
     if not message.from_user or not await is_panel_admin(message.from_user.id, store, settings):
         await state.clear()
         return
@@ -357,7 +357,7 @@ async def receive_remove_reply(message: Message, state: FSMContext, store: SQLit
 
 
 @router.callback_query(F.data == "reply:view")
-async def view_replies(callback: CallbackQuery, store: SQLiteStore, settings: Settings) -> None:
+async def view_replies(callback: CallbackQuery, store: MongoStore, settings: Settings) -> None:
     if not await _authorized_callback(callback, store, settings):
         return
     sections = []
@@ -373,7 +373,7 @@ async def view_replies(callback: CallbackQuery, store: SQLiteStore, settings: Se
 
 
 @router.callback_query(F.data.startswith("setting:toggle:"))
-async def toggle_setting(callback: CallbackQuery, store: SQLiteStore, settings: Settings) -> None:
+async def toggle_setting(callback: CallbackQuery, store: MongoStore, settings: Settings) -> None:
     if not await _authorized_callback(callback, store, settings):
         return
     key = callback.data.split(":", 2)[2]
@@ -388,7 +388,7 @@ async def toggle_setting(callback: CallbackQuery, store: SQLiteStore, settings: 
 
 
 @router.callback_query(F.data.startswith("admins:"))
-async def admin_access_actions(callback: CallbackQuery, state: FSMContext, store: SQLiteStore, settings: Settings) -> None:
+async def admin_access_actions(callback: CallbackQuery, state: FSMContext, store: MongoStore, settings: Settings) -> None:
     if not await _authorized_callback(callback, store, settings):
         return
     if callback.from_user.id not in settings.owner_ids:
@@ -408,7 +408,7 @@ async def admin_access_actions(callback: CallbackQuery, state: FSMContext, store
 
 
 @router.message(AdminFlow.waiting_admin_id, F.chat.type == ChatType.PRIVATE)
-async def receive_admin_id(message: Message, state: FSMContext, store: SQLiteStore, settings: Settings) -> None:
+async def receive_admin_id(message: Message, state: FSMContext, store: MongoStore, settings: Settings) -> None:
     if not message.from_user or message.from_user.id not in settings.owner_ids:
         await state.clear()
         return
@@ -425,7 +425,7 @@ async def receive_admin_id(message: Message, state: FSMContext, store: SQLiteSto
 
 
 @router.message(AdminFlow.waiting_remove_admin_id, F.chat.type == ChatType.PRIVATE)
-async def receive_remove_admin_id(message: Message, state: FSMContext, store: SQLiteStore, settings: Settings) -> None:
+async def receive_remove_admin_id(message: Message, state: FSMContext, store: MongoStore, settings: Settings) -> None:
     if not message.from_user or message.from_user.id not in settings.owner_ids:
         await state.clear()
         return
@@ -441,7 +441,7 @@ async def receive_remove_admin_id(message: Message, state: FSMContext, store: SQ
     await message.answer(f"✅ Removed {user_id} from panel admins.")
 
 
-async def _get_reply_custom(store: SQLiteStore, category: str) -> list[str]:
+async def _get_reply_custom(store: MongoStore, category: str) -> list[str]:
     return await store.get_custom_replies(category)
 
 
@@ -449,7 +449,7 @@ def _is_group(message: Message) -> bool:
     return message.chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}
 
 
-async def _handle_group_moderation(message: Message, store: SQLiteStore, settings: Settings, flood: FloodGuard) -> bool:
+async def _handle_group_moderation(message: Message, store: MongoStore, settings: Settings, flood: FloodGuard) -> bool:
     if not message.from_user:
         return False
     current = await store.get_settings()
@@ -488,7 +488,7 @@ async def help_command(message: Message) -> None:
 
 
 @router.message(Command("warn"))
-async def warn_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+async def warn_command(message: Message, store: MongoStore, settings: Settings) -> None:
     if not _is_group(message) or not await is_chat_admin(message, store, settings):
         return
     target = message.reply_to_message.from_user if message.reply_to_message else None
@@ -519,7 +519,7 @@ async def _moderation_target(message: Message) -> tuple[int | None, str | None]:
 
 
 @router.message(Command("mute"))
-async def mute_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+async def mute_command(message: Message, store: MongoStore, settings: Settings) -> None:
     if not _is_group(message) or not await is_chat_admin(message, store, settings):
         return
     user_id, mention = await _moderation_target(message)
@@ -538,7 +538,7 @@ async def mute_command(message: Message, store: SQLiteStore, settings: Settings)
 
 
 @router.message(Command("unmute"))
-async def unmute_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+async def unmute_command(message: Message, store: MongoStore, settings: Settings) -> None:
     if not _is_group(message) or not await is_chat_admin(message, store, settings):
         return
     user_id, mention = await _moderation_target(message)
@@ -561,7 +561,7 @@ async def unmute_command(message: Message, store: SQLiteStore, settings: Setting
 
 
 @router.message(Command("ban"))
-async def ban_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+async def ban_command(message: Message, store: MongoStore, settings: Settings) -> None:
     if not _is_group(message) or not await is_chat_admin(message, store, settings):
         return
     user_id, mention = await _moderation_target(message)
@@ -576,7 +576,7 @@ async def ban_command(message: Message, store: SQLiteStore, settings: Settings) 
 
 
 @router.message(Command("unban"))
-async def unban_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+async def unban_command(message: Message, store: MongoStore, settings: Settings) -> None:
     if not _is_group(message) or not await is_chat_admin(message, store, settings):
         return
     args = (message.text or "").split(maxsplit=1)
@@ -591,7 +591,7 @@ async def unban_command(message: Message, store: SQLiteStore, settings: Settings
 
 
 @router.message(F.new_chat_members)
-async def welcome_new_members(message: Message, store: SQLiteStore) -> None:
+async def welcome_new_members(message: Message, store: MongoStore) -> None:
     if not _is_group(message):
         return
     current = await store.get_settings()
@@ -605,7 +605,7 @@ async def welcome_new_members(message: Message, store: SQLiteStore) -> None:
 
 async def _process_group_text(
     message: Message,
-    store: SQLiteStore,
+    store: MongoStore,
     settings: Settings,
     engine: ConversationEngine,
     cooldown: Cooldown,
@@ -663,6 +663,34 @@ async def _process_group_text(
         return
     custom = await _get_reply_custom(store, "conversation")
     response = engine.reply(chat_id, user_id, message.text, custom)
+
+    # Give short, ordinary group messages a friendly fallback instead of
+    # silently ignoring them when detect_intent() cannot classify the text.
+    # This applies to every human group member; owner authorization is only
+    # used by the private admin-panel handlers above.
+    if not response and len(message.text.split()) <= 12:
+        fallback_replies = {
+            "tanglish": [
+                "Haha, seri bro! 😂 Innum sollu!",
+                "Ohh apdiya bro? 😁",
+                "Nalla iruku bro! 💚",
+                "Enna nadakuthu inga? 😂",
+            ],
+            "english": [
+                "Oh, interesting! Tell me more 😁",
+                "Haha, got you! 😂",
+                "That's cool! 💚",
+                "What's happening next? 👀",
+            ],
+            "tamil": [
+                "அப்படியா நண்பா! 😁 இன்னும் சொல்லுங்கள்!",
+                "சரி நண்பா! 😂",
+                "அருமை! 💚",
+                "என்ன நடக்குது இங்கே? 👀",
+            ],
+        }
+        response = random.choice(fallback_replies.get(language, fallback_replies["english"]))
+
     if response:
         await message.reply(response)
         await store.increment_stat("conversation_replies")
@@ -671,7 +699,7 @@ async def _process_group_text(
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.text)
 async def group_text_handler(
     message: Message,
-    store: SQLiteStore,
+    store: MongoStore,
     settings: Settings,
     engine: ConversationEngine,
     cooldown: Cooldown,
@@ -682,7 +710,7 @@ async def group_text_handler(
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.animation)
 async def group_gif_handler(
-    message: Message, store: SQLiteStore, settings: Settings,
+    message: Message, store: MongoStore, settings: Settings,
     engine: ConversationEngine, cooldown: Cooldown, flood: FloodGuard,
 ) -> None:
     if not message.from_user or message.from_user.is_bot:
@@ -702,7 +730,7 @@ async def group_gif_handler(
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.sticker)
 async def group_sticker_handler(
-    message: Message, store: SQLiteStore, settings: Settings,
+    message: Message, store: MongoStore, settings: Settings,
     engine: ConversationEngine, cooldown: Cooldown, flood: FloodGuard,
 ) -> None:
     if not message.from_user or message.from_user.is_bot:
