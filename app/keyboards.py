@@ -70,6 +70,8 @@ def reply_menu() -> InlineKeyboardMarkup:
         [("➕ Add Conversation Reply", "reply:add:conversation")],
         [("➕ Add GIF Reply", "reply:add:gif"), ("➕ Add Sticker Reply", "reply:add:sticker")],
         [("📋 View Custom Replies", "reply:view"), ("➖ Remove Reply", "reply:remove")],
+        [("📤 Import 100K+ Conversations TXT", "conversation:upload")],
+        [("📥 Export Conversations TXT", "conversation:export"), ("🔢 Conversation Count", "conversation:count")],
         [("⬅️ Main Menu", "panel:home")],
     ])
 

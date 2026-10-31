@@ -1,8 +1,8 @@
 # ANIFLIX Group Management Bot
 
-A Python Telegram group bot for ANIFLIX NETWORK TAMIL. It combines a TXT-managed anime Tamil-audio catalogue, spelling suggestions, Tanglish/English/Tamil rule-based conversation, GIF/sticker reactions, a private owner panel, and basic group moderation.
+A Python Telegram group bot for ANIFLIX NETWORK TAMIL. It combines a TXT-managed anime Tamil-audio catalogue, spelling suggestions, user-managed trigger/reply conversations, optional custom GIF/sticker reactions, a private owner panel, and basic group moderation.
 
-The conversation engine is rule/template based. It does **not** use an AI API. Its variation estimate is generated from the number of authored response bases, language-specific openers and closers, and emoji endings. The estimate describes possible combinations, not 100,000 separately handwritten sentences or unrestricted language understanding.
+Conversation matching is rule-based and uses only admin-supplied trigger/reply entries stored in SQLite. It does **not** use an AI API and does not generate built-in fallback chat replies.
 
 ## Features
 
@@ -10,8 +10,9 @@ The conversation engine is rule/template based. It does **not** use an AI API. I
 - Replies to unavailable anime with varied Tanglish messages that include `@ANIFLIXANIMETAMIL`.
 - Replies to available anime with a separate set of messages.
 - Suggests spelling corrections for short title-like messages; correction messages do not include the channel username.
-- Includes language-aware Tanglish, English and Tamil replies for common conversations, GIFs, stickers and emoji reactions.
-- Avoids immediate repeated replies per user and applies a short per-user cooldown.
+- Conversation replies come only from trigger/reply pairs that an admin imports or adds. If no saved trigger matches, the bot stays silent.
+- GIF/sticker reactions are sent only when admins have added custom reactions; there are no built-in fallback reactions.
+- Applies a short per-user cooldown.
 - Private admin panel supports bulk add/remove, TXT upload/replace/download, custom replies, settings, statistics and additional panel admins.
 - Basic group moderation: anti-link toggle, anti-flood, welcome messages, warnings, mute/unmute, ban/unban.
 - SQLite stores the source-of-truth catalogue and settings in one database file. `available_anime.txt` and `unavailable_anime.txt` are synchronized snapshots and can also seed a new database.
@@ -151,6 +152,8 @@ Edit the files in `conversation_replies/`. Each non-comment line must use:
 trigger phrase = reply text
 ```
 
-Available files: `greetings.txt`, `ai_character_replies.txt`, and `funny_replies.txt`. Add one trigger/reply pair per line. Matching uses whole words/phrases, prefers the longest matching trigger, and picks randomly among replies for the same trigger without repeating the last choice consecutively. TXT files are checked live, so changes take effect without a restart. An authorized panel admin can use `/reloadreplies` to confirm the files are detected. Keep triggers specific; avoid one-letter or overly broad triggers.
+Available starter files: `greetings.txt`, `ai_character_replies.txt`, and `funny_replies.txt`. On startup, their entries are imported into SQLite without overwriting existing entries. Use `trigger phrase = reply text`, one pair per line. Matching uses whole-word/whole-phrase boundaries and prefers the longest matching trigger.
 
-Generic conversation replies are no longer mixed with every saved custom reply, preventing unrelated replies (for example, a story response after `hi`). Unknown messages with no suitable intent are ignored.
+For large libraries, open **Admin Panel → Reply Manager → Import 100K+ Conversations TXT** and upload a UTF-8 `.txt` document. Imports are additive: existing trigger/reply pairs are kept, duplicates are skipped, and invalid lines are reported. The admin panel also provides saved-entry count and TXT export. The importer processes entries in batches and stores them in indexed SQLite tables. Telegram's standard bot file-download limit is 20 MB, so split larger files into multiple TXT uploads.
+
+**Important:** The bot sends only replies that match entries you added. It does not fall back to built-in conversation, GIF, or sticker replies. If nothing matches, it stays silent. GIF and sticker reactions must also be added by an admin.

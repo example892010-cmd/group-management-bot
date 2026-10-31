@@ -22,7 +22,7 @@ from aiogram.types import (
 
 from .catalog import Catalog, parse_title_lines
 from .config import Settings
-from .conversations import ConversationEngine, Cooldown, detect_language
+from .conversations import Cooldown
 from .keyboards import (
     admin_menu,
     anime_menu,
@@ -34,7 +34,6 @@ from .keyboards import (
 )
 from .moderation import FloodGuard
 from .storage import SQLiteStore
-from .text_replies import get_txt_reply
 
 router = Router(name="aniflix-group-bot")
 
@@ -43,6 +42,7 @@ class AdminFlow(StatesGroup):
     waiting_titles = State()
     waiting_txt = State()
     waiting_custom_reply = State()
+    waiting_conversation_txt = State()
     waiting_remove_reply = State()
     waiting_admin_id = State()
     waiting_remove_admin_id = State()
@@ -310,7 +310,13 @@ async def add_reply_start(callback: CallbackQuery, state: FSMContext, store: SQL
     category = callback.data.split(":", 2)[2]
     await state.set_state(AdminFlow.waiting_custom_reply)
     await state.update_data(reply_category=category)
-    await callback.message.answer(f"Send one or more {category} reply messages, one per line. Use /cancel to stop.")
+    if category == "conversation":
+        await callback.message.answer(
+            "Send trigger = reply lines. Example:\nhi = Hey bro! 👋\nhow are you = I'm good!\n"
+            "These are added to your saved conversation library. Use /cancel to stop."
+        )
+    else:
+        await callback.message.answer(f"Send one or more {category} reply messages, one per line. Use /cancel to stop.")
     await callback.answer()
 
 
@@ -324,6 +330,16 @@ async def receive_custom_replies(message: Message, state: FSMContext, store: SQL
         return
     data = await state.get_data()
     category = data.get("reply_category", "conversation")
+    if category == "conversation":
+        report = await store.import_conversations(message.text)
+        await state.clear()
+        await message.answer(
+            f"✅ Saved {report['added']:,} conversation entries.\n"
+            f"♻️ Duplicates skipped: {report['duplicates']:,}\n"
+            f"⚠️ Invalid lines skipped: {report['invalid']:,}\n"
+            f"💬 Total saved: {report['total']:,}"
+        )
+        return
     lines = [line.strip() for line in message.text.splitlines() if line.strip()]
     added = 0
     for line in lines:
@@ -608,7 +624,6 @@ async def _process_group_text(
     message: Message,
     store: SQLiteStore,
     settings: Settings,
-    engine: ConversationEngine,
     cooldown: Cooldown,
     flood: FloodGuard,
     catalog: Catalog,
@@ -654,40 +669,96 @@ async def _process_group_text(
 
     if not current.get("conversation_enabled", True):
         return
-    # Trigger-specific TXT replies run before generic conversation matching.
-    # Files are read on each message, so edits take effect without a restart.
-    txt_response = get_txt_reply(message.text, settings.data_dir)
-    if txt_response:
-        if cooldown.allow(chat_id, user_id, time.monotonic()):
-            await message.reply(txt_response)
-            await store.increment_stat("conversation_replies")
-        return
-    language = detect_language(message.text)
-    language_enabled = {
-        "tanglish": current.get("tanglish_enabled", True),
-        "english": current.get("english_enabled", True),
-        "tamil": current.get("tamil_enabled", True),
-    }.get(language, True)
-    if not language_enabled or not cooldown.allow(chat_id, user_id, time.monotonic()):
-        return
-    # Generic replies are selected only by their detected intent. Do not mix
-    # every saved custom reply into every intent (e.g. "hi" -> unrelated story reply).
-    response = engine.reply(chat_id, user_id, message.text)
-    if response:
+    # Only user-added trigger/reply pairs in SQLite can produce conversation replies.
+    # No hardcoded intent engine or fallback response is used.
+    response = await store.get_conversation_reply(message.text)
+    if response and cooldown.allow(chat_id, user_id, time.monotonic()):
         await message.reply(response)
         await store.increment_stat("conversation_replies")
+
+
+
+@router.callback_query(F.data.startswith("conversation:"))
+async def conversation_library_actions(
+    callback: CallbackQuery, state: FSMContext, store: SQLiteStore, settings: Settings
+) -> None:
+    if not await _authorized_callback(callback, store, settings):
+        return
+    action = callback.data.split(":", 1)[1]
+    if action == "upload":
+        await state.set_state(AdminFlow.waiting_conversation_txt)
+        await callback.message.answer(
+            "📤 Send your conversation library as a UTF-8 .txt document.\n\n"
+            "Format: trigger = reply\n"
+            "Example: hi = Hey bro! 👋\n\n"
+            "Imports are added to existing entries; duplicates are skipped, never replaced. "
+            "Use /cancel to stop."
+        )
+    elif action == "count":
+        total = await store.count_conversations()
+        await callback.message.answer(f"💬 Saved conversation entries: {total:,}")
+    elif action == "export":
+        total = await store.count_conversations()
+        if not total:
+            await callback.message.answer("No conversation entries have been saved yet.")
+        else:
+            content = await store.export_conversations()
+            await callback.message.answer_document(
+                BufferedInputFile(content.encode("utf-8"), filename="aniflix_conversations.txt"),
+                caption=f"📥 Exported {total:,} saved conversation entries.",
+            )
+    await callback.answer()
+
+
+@router.message(AdminFlow.waiting_conversation_txt, F.chat.type == ChatType.PRIVATE, F.document)
+async def receive_conversation_library(
+    message: Message, state: FSMContext, store: SQLiteStore, settings: Settings
+) -> None:
+    if not message.from_user or not await is_panel_admin(message.from_user.id, store, settings):
+        await state.clear()
+        return
+    document = message.document
+    if not document or not (document.file_name or "").lower().endswith(".txt"):
+        await message.answer("Please upload a .txt document. Nothing has been imported.")
+        return
+    # Telegram Bot API getFile downloads are limited to 20 MB for standard bots.
+    if document.file_size and document.file_size > 20 * 1024 * 1024:
+        await message.answer("This TXT is over Telegram's 20 MB bot-download limit. Split it into smaller TXT files.")
+        return
+    buffer = io.BytesIO()
+    try:
+        await message.bot.download(document, destination=buffer)
+        content = buffer.getvalue().decode("utf-8-sig")
+    except Exception:
+        await message.answer("I couldn't read that file. Please send a UTF-8 encoded TXT file.")
+        return
+    if not content.strip():
+        await message.answer("The TXT file is empty. Nothing has been imported.")
+        return
+    report = await store.import_conversations(content)
+    await state.clear()
+    await message.answer(
+        "✅ Conversation TXT import finished\n\n"
+        f"📄 Valid entries: {report['valid']:,}\n"
+        f"➕ Newly saved: {report['added']:,}\n"
+        f"♻️ Existing duplicates: {report['duplicates']:,}\n"
+        f"⚠️ Invalid lines skipped: {report['invalid']:,}\n"
+        f"💬 Total saved: {report['total']:,}\n\n"
+        "Only these saved trigger/reply entries can generate conversation replies."
+    )
+
+
+@router.message(AdminFlow.waiting_conversation_txt, F.chat.type == ChatType.PRIVATE)
+async def waiting_for_conversation_txt(message: Message) -> None:
+    await message.answer("Please send the conversation library as a .txt document, or use /cancel.")
 
 
 @router.message(Command("reloadreplies"))
 async def reload_replies_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
     if not message.from_user or not await is_panel_admin(message.from_user.id, store, settings):
         return
-    # TXT files are loaded live; this command confirms the configured folder.
-    folder = settings.data_dir / "conversation_replies"
-    if not folder.exists():
-        folder = __import__("pathlib").Path(__file__).resolve().parent.parent / "conversation_replies"
-    count = len(list(folder.glob("*.txt"))) if folder.exists() else 0
-    await message.answer(f"✅ Reply TXT files refreshed. Found {count} file(s). Changes also load automatically.")
+    total = await store.count_conversations()
+    await message.answer(f"✅ Conversation library ready. {total:,} trigger/reply entries are saved in SQLite.")
 
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.text)
@@ -695,17 +766,16 @@ async def group_text_handler(
     message: Message,
     store: SQLiteStore,
     settings: Settings,
-    engine: ConversationEngine,
     cooldown: Cooldown,
     flood: FloodGuard,
 ) -> None:
-    await _process_group_text(message, store, settings, engine, cooldown, flood, store.catalog)
+    await _process_group_text(message, store, settings, cooldown, flood, store.catalog)
 
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.animation)
 async def group_gif_handler(
     message: Message, store: SQLiteStore, settings: Settings,
-    engine: ConversationEngine, cooldown: Cooldown, flood: FloodGuard,
+    cooldown: Cooldown, flood: FloodGuard,
 ) -> None:
     if not message.from_user or message.from_user.is_bot:
         return
@@ -717,15 +787,16 @@ async def group_gif_handler(
     if not cooldown.allow(message.chat.id, message.from_user.id, time.monotonic()):
         return
     custom = await store.get_custom_replies("gif")
-    response = random.choice(custom) if custom else engine.media_reply(message.chat.id, message.from_user.id, "gif", message.caption or "")
-    await message.reply(response)
+    if not custom:
+        return
+    await message.reply(random.choice(custom))
     await store.increment_stat("media_reactions")
 
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.sticker)
 async def group_sticker_handler(
     message: Message, store: SQLiteStore, settings: Settings,
-    engine: ConversationEngine, cooldown: Cooldown, flood: FloodGuard,
+    cooldown: Cooldown, flood: FloodGuard,
 ) -> None:
     if not message.from_user or message.from_user.is_bot:
         return
@@ -737,6 +808,7 @@ async def group_sticker_handler(
     if not cooldown.allow(message.chat.id, message.from_user.id, time.monotonic()):
         return
     custom = await store.get_custom_replies("sticker")
-    response = random.choice(custom) if custom else engine.media_reply(message.chat.id, message.from_user.id, "sticker", message.caption or "")
-    await message.reply(response)
+    if not custom:
+        return
+    await message.reply(random.choice(custom))
     await store.increment_stat("media_reactions")

@@ -6,6 +6,7 @@ from contextlib import closing
 import hashlib
 import json
 import logging
+import random
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -77,6 +78,16 @@ class SQLiteStore:
                     text TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_replies_category ON custom_replies(category);
+                CREATE TABLE IF NOT EXISTS conversation_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trigger_text TEXT NOT NULL,
+                    normalized_trigger TEXT NOT NULL,
+                    first_token TEXT NOT NULL,
+                    reply_text TEXT NOT NULL,
+                    UNIQUE(normalized_trigger, reply_text)
+                );
+                CREATE INDEX IF NOT EXISTS idx_conversation_first_token
+                    ON conversation_entries(first_token);
                 CREATE TABLE IF NOT EXISTS warnings (
                     chat_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
@@ -104,6 +115,9 @@ class SQLiteStore:
             unavailable = [r["title"] for r in rows if r["status"] == "unavailable"]
             self.catalog = Catalog(available, unavailable)
         await self._write_txt_snapshots(self.catalog)
+        # Seed only user-provided trigger/reply TXT entries. INSERT OR IGNORE makes
+        # startup repeatable and preserves entries imported later through the panel.
+        await self.import_conversation_text_files()
         log.info(
             "SQLite connected at %s; loaded %s available and %s unavailable anime titles",
             self.database_path, len(self.catalog.available), len(self.catalog.unavailable)
@@ -245,6 +259,124 @@ class SQLiteStore:
     async def remove_custom_reply(self, category: str, text: str) -> bool:
         key = hashlib.sha256(f"{category}\0{text.strip()}".encode("utf-8")).hexdigest()
         return await self._run(self._remove_reply_sync, key)
+
+
+    @staticmethod
+    def _prepare_conversation_rows(content: str) -> tuple[list[tuple[str, str, str, str]], int]:
+        rows: list[tuple[str, str, str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        invalid = 0
+        for raw_line in content.splitlines():
+            line = raw_line.strip().lstrip("\ufeff")
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                invalid += 1
+                continue
+            trigger, reply = (part.strip() for part in line.split("=", 1))
+            normalized = normalize_title(trigger)
+            if not normalized or not reply or len(trigger) > 250 or len(reply) > 4000:
+                invalid += 1
+                continue
+            pair = (normalized, reply)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            rows.append((trigger, normalized, normalized.split()[0], reply))
+        return rows, invalid
+
+    def _import_conversations_sync(self, content: str) -> dict[str, int]:
+        rows, invalid = self._prepare_conversation_rows(content)
+        inserted = 0
+        with closing(self._connect()) as conn:
+            with conn:
+                for start in range(0, len(rows), 1000):
+                    before = conn.total_changes
+                    conn.executemany(
+                        """INSERT OR IGNORE INTO conversation_entries
+                        (trigger_text, normalized_trigger, first_token, reply_text)
+                        VALUES (?, ?, ?, ?)""",
+                        rows[start:start + 1000],
+                    )
+                    inserted += conn.total_changes - before
+        return {
+            "valid": len(rows),
+            "added": inserted,
+            "duplicates": len(rows) - inserted,
+            "invalid": invalid,
+            "total": self._count_conversations_sync(),
+        }
+
+    def _count_conversations_sync(self) -> int:
+        with closing(self._connect()) as conn, conn:
+            return int(conn.execute("SELECT COUNT(*) FROM conversation_entries").fetchone()[0])
+
+    async def import_conversations(self, content: str) -> dict[str, int]:
+        """Append a bulk trigger = reply TXT file; existing pairs are never erased."""
+        return await self._run(self._import_conversations_sync, content)
+
+    def _import_conversation_text_files_sync(self, folder: Path) -> int:
+        if not folder.exists():
+            return 0
+        imported = 0
+        for path in sorted(folder.glob("*.txt")):
+            try:
+                content = path.read_text(encoding="utf-8-sig")
+            except (OSError, UnicodeError):
+                continue
+            report = self._import_conversations_sync(content)
+            imported += report["added"]
+        return imported
+
+    async def import_conversation_text_files(self) -> int:
+        folder = self.data_dir / "conversation_replies"
+        if not folder.exists():
+            folder = Path(__file__).resolve().parent.parent / "conversation_replies"
+        return await self._run(self._import_conversation_text_files_sync, folder)
+
+    def _get_conversation_reply_sync(self, message: str) -> str | None:
+        normalized_message = normalize_title(message)
+        if not normalized_message:
+            return None
+        tokens = list(dict.fromkeys(normalized_message.split()))
+        placeholders = ",".join("?" for _ in tokens)
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""SELECT normalized_trigger, reply_text
+                    FROM conversation_entries
+                    WHERE first_token IN ({placeholders})""",
+                tokens,
+            ).fetchall()
+        message_padded = f" {normalized_message} "
+        matched: list[tuple[int, str, str]] = []
+        for row in rows:
+            trigger = row["normalized_trigger"]
+            if f" {trigger} " in message_padded:
+                matched.append((len(trigger), trigger, row["reply_text"]))
+        if not matched:
+            return None
+        longest = max(item[0] for item in matched)
+        best = [(trigger, reply) for size, trigger, reply in matched if size == longest]
+        # Randomize only among replies for the most-specific matched trigger(s).
+        choices = list(dict.fromkeys(reply for _, reply in best))
+        return random.choice(choices) if choices else None
+
+    async def get_conversation_reply(self, message: str) -> str | None:
+        return await self._run(self._get_conversation_reply_sync, message)
+
+    async def count_conversations(self) -> int:
+        return await self._run(self._count_conversations_sync)
+
+    def _export_conversations_sync(self) -> str:
+        with closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                """SELECT trigger_text, reply_text FROM conversation_entries
+                   ORDER BY normalized_trigger COLLATE NOCASE, id"""
+            ).fetchall()
+        return "".join(f"{row['trigger_text']} = {row['reply_text']}\\n" for row in rows)
+
+    async def export_conversations(self) -> str:
+        return await self._run(self._export_conversations_sync)
 
     def _increment_stat_sync(self, name: str, amount: int) -> None:
         with closing(self._connect()) as conn, conn:

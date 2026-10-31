@@ -12,7 +12,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
 from .config import Settings
-from .conversations import ConversationEngine, Cooldown
+from .conversations import Cooldown
 from .handlers import router
 from .moderation import FloodGuard
 from .storage import SQLiteStore
@@ -39,7 +39,6 @@ async def run_async() -> None:
     dp.workflow_data.update(
         store=store,
         settings=settings,
-        engine=ConversationEngine(),
         cooldown=Cooldown(seconds=6.0),
         flood=FloodGuard(limit=7, window_seconds=10.0),
     )
