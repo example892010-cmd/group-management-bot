@@ -1,1 +1,0 @@
-# One unavailable anime title per line. Add titles through the bot's private admin panel.
