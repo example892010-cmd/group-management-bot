@@ -13,9 +13,7 @@ services:
         sync: false
       - key: OWNER_ID
         sync: false
-      - key: MONGODB_URL
-        sync: false
-      - key: DB_NAME
-        value: aniflix_group_bot
+      - key: DATABASE_PATH
+        value: ./data/aniflix_group_management.db
       - key: BOT_CHANNEL_USERNAME
         value: '@ANIFLIXANIMETAMIL'

@@ -1,14 +1,15 @@
-"""MongoDB persistence and TXT snapshot management."""
+"""SQLite persistence and TXT snapshot management."""
 from __future__ import annotations
 
 import asyncio
+from contextlib import closing
 import hashlib
+import json
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-from pymongo import ASCENDING, AsyncMongoClient, ReturnDocument
 
 from .catalog import Catalog, normalize_title, parse_title_lines
 
@@ -28,50 +29,98 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 
-class MongoStore:
-    def __init__(self, mongo_url: str, db_name: str, data_dir: Path) -> None:
-        self.client = AsyncMongoClient(mongo_url, serverSelectionTimeoutMS=12000)
-        self.db = self.client[db_name]
+class SQLiteStore:
+    """Small async-facing SQLite store; blocking SQLite work runs in worker threads."""
+
+    def __init__(self, database_path: str | Path, data_dir: Path) -> None:
+        self.database_path = Path(database_path).expanduser().resolve()
         self.data_dir = data_dir
-        self.anime = self.db["anime_titles"]
-        self.settings = self.db["bot_settings"]
-        self.stats = self.db["bot_stats"]
-        self.admins = self.db["authorized_admins"]
-        self.replies = self.db["custom_replies"]
-        self.warnings = self.db["warnings"]
         self._catalog_lock = asyncio.Lock()
         self.catalog = Catalog()
 
+    def _connect(self) -> sqlite3.Connection:
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(self.database_path), timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+
+    async def _run(self, fn, *args):
+        return await asyncio.to_thread(fn, *args)
+
+    def _initialize_sync(self) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS anime_titles (
+                    normalized_title TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('available','unavailable'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_anime_status ON anime_titles(status);
+                CREATE TABLE IF NOT EXISTS bot_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS bot_stats (
+                    name TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS authorized_admins (
+                    user_id INTEGER PRIMARY KEY,
+                    added_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS custom_replies (
+                    reply_key TEXT PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    text TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_replies_category ON custom_replies(category);
+                CREATE TABLE IF NOT EXISTS warnings (
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(chat_id, user_id)
+                );
+            """)
+            for key, value in DEFAULT_SETTINGS.items():
+                conn.execute(
+                    "INSERT OR IGNORE INTO bot_settings(key, value) VALUES (?, ?)",
+                    (key, json.dumps(value)),
+                )
+
     async def connect(self) -> None:
-        await self.client.admin.command("ping")
-        await self.anime.create_index([("status", ASCENDING)])
-        await self.warnings.create_index([("chat_id", ASCENDING), ("user_id", ASCENDING)], unique=True)
-        await self.replies.create_index([("category", ASCENDING)])
-        count = await self.anime.count_documents({})
-        if count == 0:
+        await self._run(self._initialize_sync)
+        rows = await self._run(self._fetch_anime_sync)
+        if not rows:
             self.catalog = Catalog(
                 available=self._read_txt("available_anime.txt"),
                 unavailable=self._read_txt("unavailable_anime.txt"),
             )
             await self._write_catalog_to_db(self.catalog)
         else:
-            docs = await self.anime.find({}, {"_id": 0, "title": 1, "status": 1}).to_list(length=None)
-            available = [d["title"] for d in docs if d.get("status") == "available"]
-            unavailable = [d["title"] for d in docs if d.get("status") == "unavailable"]
+            available = [r["title"] for r in rows if r["status"] == "available"]
+            unavailable = [r["title"] for r in rows if r["status"] == "unavailable"]
             self.catalog = Catalog(available, unavailable)
         await self._write_txt_snapshots(self.catalog)
-        current = await self.settings.find_one({"_id": "global"})
-        if current is None:
-            await self.settings.insert_one({"_id": "global", **DEFAULT_SETTINGS})
-        log.info("MongoDB connected; loaded %s available and %s unavailable anime titles", len(self.catalog.available), len(self.catalog.unavailable))
+        log.info(
+            "SQLite connected at %s; loaded %s available and %s unavailable anime titles",
+            self.database_path, len(self.catalog.available), len(self.catalog.unavailable)
+        )
 
     async def close(self) -> None:
-        await self.client.close()
+        return None
+
+    def _fetch_anime_sync(self):
+        with closing(self._connect()) as conn, conn:
+            return [dict(r) for r in conn.execute(
+                "SELECT title, status FROM anime_titles ORDER BY title COLLATE NOCASE"
+            ).fetchall()]
 
     def _read_txt(self, filename: str) -> list[str]:
-        path = self.data_dir / filename
         try:
-            return parse_title_lines(path.read_text(encoding="utf-8"))
+            return parse_title_lines((self.data_dir / filename).read_text(encoding="utf-8"))
         except FileNotFoundError:
             return []
 
@@ -86,18 +135,22 @@ class MongoStore:
             temporary.write_text(catalog.export_text(status), encoding="utf-8")
             temporary.replace(path)
 
+    def _replace_catalog_sync(self, catalog: Catalog) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("DELETE FROM anime_titles")
+            conn.executemany(
+                "INSERT INTO anime_titles(normalized_title, title, status) VALUES (?, ?, ?)",
+                [
+                    (normalize_title(title), title, status)
+                    for status in ("available", "unavailable")
+                    for title in catalog.titles(status) if normalize_title(title)
+                ],
+            )
+
     async def _write_catalog_to_db(self, catalog: Catalog) -> None:
-        docs = [
-            {"_id": normalize_title(title), "title": title, "status": status}
-            for status in ("available", "unavailable")
-            for title in catalog.titles(status) if normalize_title(title)
-        ]
-        await self.anime.delete_many({})
-        if docs:
-            await self.anime.insert_many(docs, ordered=False)
+        await self._run(self._replace_catalog_sync, catalog)
 
     async def get_catalog(self) -> Catalog:
-        # The bot uses an in-memory catalog for matching; this returns a copy for safe edits.
         return Catalog(list(self.catalog.available), list(self.catalog.unavailable))
 
     async def save_catalog(self, catalog: Catalog) -> None:
@@ -106,63 +159,140 @@ class MongoStore:
             await self._write_txt_snapshots(catalog)
             self.catalog = Catalog(list(catalog.available), list(catalog.unavailable))
 
+    def _get_settings_sync(self):
+        with closing(self._connect()) as conn, conn:
+            return {r["key"]: json.loads(r["value"]) for r in conn.execute(
+                "SELECT key, value FROM bot_settings"
+            ).fetchall()}
+
     async def get_settings(self) -> dict[str, Any]:
-        doc = await self.settings.find_one({"_id": "global"}) or {}
-        return {**DEFAULT_SETTINGS, **{k: v for k, v in doc.items() if k != "_id"}}
+        return {**DEFAULT_SETTINGS, **await self._run(self._get_settings_sync)}
+
+    def _set_setting_sync(self, key: str, value: Any) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                "INSERT INTO bot_settings(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, json.dumps(value)),
+            )
 
     async def set_setting(self, key: str, value: Any) -> None:
         if key not in DEFAULT_SETTINGS:
             raise ValueError(f"Unsupported setting: {key}")
-        await self.settings.update_one({"_id": "global"}, {"$set": {key: value}}, upsert=True)
+        await self._run(self._set_setting_sync, key, value)
+
+    def _add_admin_sync(self, user_id: int) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                "INSERT INTO authorized_admins(user_id, added_at) VALUES (?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET added_at=excluded.added_at",
+                (int(user_id), datetime.now(timezone.utc).isoformat()),
+            )
 
     async def add_admin(self, user_id: int) -> None:
-        await self.admins.update_one({"_id": int(user_id)}, {"$set": {"added_at": datetime.now(timezone.utc)}}, upsert=True)
+        await self._run(self._add_admin_sync, user_id)
+
+    def _remove_admin_sync(self, user_id: int) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("DELETE FROM authorized_admins WHERE user_id=?", (int(user_id),))
 
     async def remove_admin(self, user_id: int) -> None:
-        await self.admins.delete_one({"_id": int(user_id)})
+        await self._run(self._remove_admin_sync, user_id)
+
+    def _is_admin_sync(self, user_id: int) -> bool:
+        with closing(self._connect()) as conn, conn:
+            return conn.execute("SELECT 1 FROM authorized_admins WHERE user_id=?", (int(user_id),)).fetchone() is not None
 
     async def is_authorized_admin(self, user_id: int, owner_ids: frozenset[int]) -> bool:
-        return user_id in owner_ids or await self.admins.find_one({"_id": int(user_id)}) is not None
+        return user_id in owner_ids or await self._run(self._is_admin_sync, user_id)
+
+    def _list_admins_sync(self) -> list[int]:
+        with closing(self._connect()) as conn, conn:
+            return [int(r["user_id"]) for r in conn.execute("SELECT user_id FROM authorized_admins ORDER BY user_id")]
 
     async def list_admins(self) -> list[int]:
-        return [int(doc["_id"]) async for doc in self.admins.find({}, {"_id": 1})]
+        return await self._run(self._list_admins_sync)
+
+    def _add_reply_sync(self, category: str, clean: str, key: str) -> bool:
+        with closing(self._connect()) as conn, conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO custom_replies(reply_key, category, text) VALUES (?, ?, ?)",
+                (key, category, clean),
+            )
+            return cur.rowcount > 0
 
     async def add_custom_reply(self, category: str, text: str) -> bool:
         clean = text.strip()
         if not clean:
             return False
         key = hashlib.sha256(f"{category}\0{clean}".encode("utf-8")).hexdigest()
-        result = await self.replies.update_one(
-            {"_id": key}, {"$setOnInsert": {"category": category, "text": clean}}, upsert=True
-        )
-        return result.upserted_id is not None
+        return await self._run(self._add_reply_sync, category, clean, key)
+
+    def _get_replies_sync(self, category: str) -> list[str]:
+        with closing(self._connect()) as conn, conn:
+            return [r["text"] for r in conn.execute(
+                "SELECT text FROM custom_replies WHERE category=? ORDER BY rowid", (category,)
+            )]
 
     async def get_custom_replies(self, category: str) -> list[str]:
-        return [doc["text"] async for doc in self.replies.find({"category": category}, {"text": 1})]
+        return await self._run(self._get_replies_sync, category)
+
+    def _remove_reply_sync(self, key: str) -> bool:
+        with closing(self._connect()) as conn, conn:
+            cur = conn.execute("DELETE FROM custom_replies WHERE reply_key=?", (key,))
+            return cur.rowcount > 0
 
     async def remove_custom_reply(self, category: str, text: str) -> bool:
         key = hashlib.sha256(f"{category}\0{text.strip()}".encode("utf-8")).hexdigest()
-        result = await self.replies.delete_one({"_id": key})
-        return result.deleted_count > 0
+        return await self._run(self._remove_reply_sync, key)
+
+    def _increment_stat_sync(self, name: str, amount: int) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                "INSERT INTO bot_stats(name, value) VALUES (?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET value=value+excluded.value",
+                (name, int(amount)),
+            )
 
     async def increment_stat(self, name: str, amount: int = 1) -> None:
-        await self.stats.update_one({"_id": "global"}, {"$inc": {name: amount}}, upsert=True)
+        await self._run(self._increment_stat_sync, name, amount)
+
+    def _get_stats_sync(self) -> dict[str, int]:
+        with closing(self._connect()) as conn, conn:
+            return {r["name"]: int(r["value"]) for r in conn.execute("SELECT name, value FROM bot_stats")}
 
     async def get_stats(self) -> dict[str, int]:
-        doc = await self.stats.find_one({"_id": "global"}) or {}
-        doc.pop("_id", None)
-        return {key: int(value) for key, value in doc.items() if isinstance(value, (int, float))}
+        return await self._run(self._get_stats_sync)
+
+    def _add_warning_sync(self, chat_id: int, user_id: int) -> int:
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                "INSERT INTO warnings(chat_id, user_id, count) VALUES (?, ?, 1) "
+                "ON CONFLICT(chat_id, user_id) DO UPDATE SET count=count+1",
+                (int(chat_id), int(user_id)),
+            )
+            return int(conn.execute(
+                "SELECT count FROM warnings WHERE chat_id=? AND user_id=?",
+                (int(chat_id), int(user_id)),
+            ).fetchone()["count"])
 
     async def add_warning(self, chat_id: int, user_id: int) -> int:
-        doc = await self.warnings.find_one_and_update(
-            {"chat_id": int(chat_id), "user_id": int(user_id)},
-            {"$inc": {"count": 1}}, upsert=True, return_document=ReturnDocument.AFTER,
-        )
-        return int(doc.get("count", 1)) if doc else 1
+        return await self._run(self._add_warning_sync, chat_id, user_id)
+
+    def _clear_warnings_sync(self, chat_id: int, user_id: int) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("DELETE FROM warnings WHERE chat_id=? AND user_id=?", (int(chat_id), int(user_id)))
 
     async def clear_warnings(self, chat_id: int, user_id: int) -> None:
-        await self.warnings.delete_one({"chat_id": int(chat_id), "user_id": int(user_id)})
+        await self._run(self._clear_warnings_sync, chat_id, user_id)
+
+    def _warning_count_sync(self, chat_id: int, user_id: int) -> int:
+        with closing(self._connect()) as conn, conn:
+            row = conn.execute(
+                "SELECT count FROM warnings WHERE chat_id=? AND user_id=?",
+                (int(chat_id), int(user_id)),
+            ).fetchone()
+            return int(row["count"]) if row else 0
 
     async def warning_count(self, chat_id: int, user_id: int) -> int:
-        doc = await self.warnings.find_one({"chat_id": int(chat_id), "user_id": int(user_id)})
-        return int(doc.get("count", 0)) if doc else 0
+        return await self._run(self._warning_count_sync, chat_id, user_id)

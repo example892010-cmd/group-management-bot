@@ -15,7 +15,7 @@ from .config import Settings
 from .conversations import ConversationEngine, Cooldown
 from .handlers import router
 from .moderation import FloodGuard
-from .storage import MongoStore
+from .storage import SQLiteStore
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -30,7 +30,7 @@ async def health_handler(_: web.Request) -> web.Response:
 
 async def run_async() -> None:
     settings = Settings.from_env()
-    store = MongoStore(settings.mongo_url, settings.db_name, settings.data_dir)
+    store = SQLiteStore(settings.database_path, settings.data_dir)
     await store.connect()
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=None))
