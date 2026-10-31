@@ -34,6 +34,7 @@ from .keyboards import (
 )
 from .moderation import FloodGuard
 from .storage import SQLiteStore
+from .text_replies import get_txt_reply
 
 router = Router(name="aniflix-group-bot")
 
@@ -74,15 +75,9 @@ LINK_PATTERN = re.compile(r"(?:https?://|www\.|t\.me/|telegram\.me/)", re.IGNORE
 
 def muted_permissions() -> ChatPermissions:
     return ChatPermissions(
-        can_send_messages=False,
-        can_send_audios=False,
-        can_send_documents=False,
-        can_send_photos=False,
-        can_send_videos=False,
-        can_send_video_notes=False,
-        can_send_voice_notes=False,
-        can_send_polls=False,
-        can_send_other_messages=False,
+        can_send_messages=False, can_send_audios=False, can_send_documents=False,
+        can_send_photos=False, can_send_videos=False, can_send_video_notes=False,
+        can_send_voice_notes=False, can_send_polls=False, can_send_other_messages=False,
         can_add_web_page_previews=False,
     )
 
@@ -505,8 +500,7 @@ async def warn_command(message: Message, store: SQLiteStore, settings: Settings)
     if count >= 3:
         try:
             await message.bot.restrict_chat_member(
-                chat_id=message.chat.id,
-                user_id=target.id,
+                chat_id=message.chat.id, user_id=target.id,
                 permissions=muted_permissions(),
                 until_date=datetime.now(timezone.utc) + timedelta(minutes=10),
             )
@@ -535,8 +529,7 @@ async def mute_command(message: Message, store: SQLiteStore, settings: Settings)
         return
     try:
         await message.bot.restrict_chat_member(
-            chat_id=message.chat.id,
-            user_id=user_id,
+            chat_id=message.chat.id, user_id=user_id,
             permissions=muted_permissions(),
             until_date=datetime.now(timezone.utc) + timedelta(minutes=30),
         )
@@ -555,18 +548,11 @@ async def unmute_command(message: Message, store: SQLiteStore, settings: Setting
         return
     try:
         await message.bot.restrict_chat_member(
-            chat_id=message.chat.id,
-            user_id=user_id,
+            chat_id=message.chat.id, user_id=user_id,
             permissions=ChatPermissions(
-                can_send_messages=True,
-                can_send_audios=True,
-                can_send_documents=True,
-                can_send_photos=True,
-                can_send_videos=True,
-                can_send_video_notes=True,
-                can_send_voice_notes=True,
-                can_send_polls=True,
-                can_send_other_messages=True,
+                can_send_messages=True, can_send_audios=True, can_send_documents=True,
+                can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
+                can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
                 can_add_web_page_previews=True,
             ),
         )
@@ -637,7 +623,6 @@ async def _process_group_text(
     user_id = message.from_user.id
     chat_id = message.chat.id
 
-    # 1. Check exact / partial catalog match
     match = catalog.find_mentioned(message.text)
     if match:
         title, status = match
@@ -657,7 +642,6 @@ async def _process_group_text(
         await store.increment_stat("anime_matches")
         return
 
-    # 2. Check spelling suggestions
     current = await store.get_settings()
     if current.get("spelling_correction", True):
         suggestion = catalog.suggest_correction(message.text)
@@ -668,8 +652,15 @@ async def _process_group_text(
                 await store.increment_stat("corrections")
             return
 
-    # 3. Handle natural language conversation (all members)
     if not current.get("conversation_enabled", True):
+        return
+    # Trigger-specific TXT replies run before generic conversation matching.
+    # Files are read on each message, so edits take effect without a restart.
+    txt_response = get_txt_reply(message.text, settings.data_dir)
+    if txt_response:
+        if cooldown.allow(chat_id, user_id, time.monotonic()):
+            await message.reply(txt_response)
+            await store.increment_stat("conversation_replies")
         return
     language = detect_language(message.text)
     language_enabled = {
@@ -679,11 +670,24 @@ async def _process_group_text(
     }.get(language, True)
     if not language_enabled or not cooldown.allow(chat_id, user_id, time.monotonic()):
         return
-    custom = await _get_reply_custom(store, "conversation")
-    response = engine.reply(chat_id, user_id, message.text, custom)
+    # Generic replies are selected only by their detected intent. Do not mix
+    # every saved custom reply into every intent (e.g. "hi" -> unrelated story reply).
+    response = engine.reply(chat_id, user_id, message.text)
     if response:
         await message.reply(response)
         await store.increment_stat("conversation_replies")
+
+
+@router.message(Command("reloadreplies"))
+async def reload_replies_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+    if not message.from_user or not await is_panel_admin(message.from_user.id, store, settings):
+        return
+    # TXT files are loaded live; this command confirms the configured folder.
+    folder = settings.data_dir / "conversation_replies"
+    if not folder.exists():
+        folder = __import__("pathlib").Path(__file__).resolve().parent.parent / "conversation_replies"
+    count = len(list(folder.glob("*.txt"))) if folder.exists() else 0
+    await message.answer(f"✅ Reply TXT files refreshed. Found {count} file(s). Changes also load automatically.")
 
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.text)
@@ -700,12 +704,8 @@ async def group_text_handler(
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.animation)
 async def group_gif_handler(
-    message: Message,
-    store: SQLiteStore,
-    settings: Settings,
-    engine: ConversationEngine,
-    cooldown: Cooldown,
-    flood: FloodGuard,
+    message: Message, store: SQLiteStore, settings: Settings,
+    engine: ConversationEngine, cooldown: Cooldown, flood: FloodGuard,
 ) -> None:
     if not message.from_user or message.from_user.is_bot:
         return
@@ -724,12 +724,8 @@ async def group_gif_handler(
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.sticker)
 async def group_sticker_handler(
-    message: Message,
-    store: SQLiteStore,
-    settings: Settings,
-    engine: ConversationEngine,
-    cooldown: Cooldown,
-    flood: FloodGuard,
+    message: Message, store: SQLiteStore, settings: Settings,
+    engine: ConversationEngine, cooldown: Cooldown, flood: FloodGuard,
 ) -> None:
     if not message.from_user or message.from_user.is_bot:
         return

@@ -1,0 +1,9 @@
+# Exact phrase/whole-word trigger = reply. Add more lines in this format.
+hi = Hey bro! 👋 How's it going?
+hello = Hello! 😁 What's up?
+hey = Heyyy! 💚
+hii = Hiii bro! 🍥
+hiii = Heyyy! 😎
+vanakkam = Vanakkam nanba! 💚
+good morning = Good morning! ☀️
+good night = Good night! 🌙

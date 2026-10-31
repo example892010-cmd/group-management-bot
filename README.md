@@ -141,3 +141,16 @@ pytest -q
 ```
 
 The tests cover title parsing, duplicate/conflict handling, bulk removal, exact title matching, fuzzy correction, language/intent detection, response variation, GIF/sticker replies, cooldowns, and anti-flood thresholds. Live Telegram and SQLite integration must be checked with the credentials and group permissions in your own deployment.
+
+
+## Custom conversation replies (TXT)
+
+Edit the files in `conversation_replies/`. Each non-comment line must use:
+
+```text
+trigger phrase = reply text
+```
+
+Available files: `greetings.txt`, `ai_character_replies.txt`, and `funny_replies.txt`. Add one trigger/reply pair per line. Matching uses whole words/phrases, prefers the longest matching trigger, and picks randomly among replies for the same trigger without repeating the last choice consecutively. TXT files are checked live, so changes take effect without a restart. An authorized panel admin can use `/reloadreplies` to confirm the files are detected. Keep triggers specific; avoid one-letter or overly broad triggers.
+
+Generic conversation replies are no longer mixed with every saved custom reply, preventing unrelated replies (for example, a story response after `hi`). Unknown messages with no suitable intent are ignored.

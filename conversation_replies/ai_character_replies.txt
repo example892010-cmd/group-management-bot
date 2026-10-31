@@ -1,0 +1,10 @@
+# The bot gives a playful character answer to AI/bot identity questions.
+are you ai = I'm Gojo Satoru! 😎
+are you an ai = I'm Naruto Uzumaki! 🍥
+are you a bot = I'm Tanjiro Kamado! ⚔️
+are you robot = I'm Levi Ackerman! 🗡️
+who are you = I'm Satoru Gojo! The strongest! 💙
+what are you = I'm Rimuru Tempest! 💧
+nee ai ah bot ah = Gojo Satoru da! 😎
+nee bot ah = Naruto Uzumaki! Believe it! 🍥
+nee yaaru = I'm Anya Forger! Hehe! 🌸
