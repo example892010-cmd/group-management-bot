@@ -48,3 +48,21 @@ async def test_large_import_is_chunked_and_counted(tmp_path):
     assert report["total"] == baseline + 100_000
     assert await store.get_conversation_reply("trigger99999") == "reply99999"
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_clear_conversations_removes_all_saved_pairs(tmp_path):
+    store = SQLiteStore(tmp_path / "clear.db", tmp_path)
+    await store.connect()
+    baseline = await store.count_conversations()
+    await store.import_conversations("cleartrigger1 = Reply one\ncleartrigger2 = Reply two\n")
+    assert await store.count_conversations() == baseline + 2
+
+    deleted = await store.clear_conversations()
+
+    assert deleted == baseline + 2
+    assert await store.count_conversations() == 0
+    assert await store.get_conversation_reply("cleartrigger1") is None
+    # Clearing an already-empty library is safe and reports zero.
+    assert await store.clear_conversations() == 0
+    await store.close()
