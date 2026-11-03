@@ -28,6 +28,7 @@ from .keyboards import (
     anime_menu,
     back_home,
     conversation_settings,
+    clear_conversations_confirmation,
     main_menu,
     moderation_settings,
     reply_menu,
@@ -697,6 +698,21 @@ async def conversation_library_actions(
     elif action == "count":
         total = await store.count_conversations()
         await callback.message.answer(f"💬 Saved conversation entries: {total:,}")
+    elif action == "clear":
+        total = await store.count_conversations()
+        if not total:
+            await callback.message.answer("There are no saved conversations to clear.")
+        else:
+            await callback.message.answer(
+                f"⚠️ Clear all {total:,} saved conversation entries?\n\n"
+                "This cannot be undone. Export a backup first if you may need these entries.",
+                reply_markup=clear_conversations_confirmation(),
+            )
+    elif action == "clear_confirm":
+        deleted = await store.clear_conversations()
+        await callback.message.answer(f"🗑 Cleared {deleted:,} saved conversation entries. The conversation library is now empty.")
+    elif action == "clear_cancel":
+        await callback.message.answer("✅ Clear cancelled. Your saved conversations are unchanged.")
     elif action == "export":
         total = await store.count_conversations()
         if not total:
