@@ -367,6 +367,18 @@ class SQLiteStore:
     async def count_conversations(self) -> int:
         return await self._run(self._count_conversations_sync)
 
+    def _clear_conversations_sync(self) -> int:
+        with closing(self._connect()) as conn, conn:
+            before = int(conn.execute("SELECT COUNT(*) FROM conversation_entries").fetchone()[0])
+            conn.execute("DELETE FROM conversation_entries")
+            # Reset the auto-increment counter so the cleared library starts fresh.
+            conn.execute("DELETE FROM sqlite_sequence WHERE name = 'conversation_entries'")
+            return before
+
+    async def clear_conversations(self) -> int:
+        """Delete every saved custom conversation trigger/reply pair."""
+        return await self._run(self._clear_conversations_sync)
+
     def _export_conversations_sync(self) -> str:
         with closing(self._connect()) as conn, conn:
             rows = conn.execute(
