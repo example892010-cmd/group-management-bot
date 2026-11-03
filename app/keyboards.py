@@ -72,6 +72,7 @@ def reply_menu() -> InlineKeyboardMarkup:
         [("📋 View Custom Replies", "reply:view"), ("➖ Remove Reply", "reply:remove")],
         [("📤 Import 100K+ Conversations TXT", "conversation:upload")],
         [("📥 Export Conversations TXT", "conversation:export"), ("🔢 Conversation Count", "conversation:count")],
+        [("🗑 Clear All Conversations", "conversation:clear")],
         [("⬅️ Main Menu", "panel:home")],
     ])
 
@@ -81,4 +82,10 @@ def admin_menu() -> InlineKeyboardMarkup:
         [("➕ Add Admin", "admins:add"), ("➖ Remove Admin", "admins:remove")],
         [("📋 List Admins", "admins:list")],
         [("⬅️ Main Menu", "panel:home")],
+    ])
+
+
+def clear_conversations_confirmation() -> InlineKeyboardMarkup:
+    return keyboard([
+        [("🗑 Yes, clear all", "conversation:clear_confirm"), ("✖️ Cancel", "conversation:clear_cancel")],
     ])
