@@ -14,7 +14,7 @@ from aiogram.types import BotCommand
 from .config import Settings
 from .conversations import Cooldown
 from .handlers import router
-from .moderation import FloodGuard
+from .moderation import FloodGuard, JoinBurstGuard
 from .storage import SQLiteStore
 
 logging.basicConfig(
@@ -41,10 +41,18 @@ async def run_async() -> None:
         settings=settings,
         cooldown=Cooldown(seconds=6.0),
         flood=FloodGuard(limit=7, window_seconds=10.0),
+        raid_guard=JoinBurstGuard(limit=6, window_seconds=15.0),
     )
     await bot.set_my_commands([
         BotCommand(command="start", description="Start the bot"),
-        BotCommand(command="myid", description="Show your numeric Telegram ID"),
+        BotCommand(command="id", description="Show user and chat IDs"),
+        BotCommand(command="info", description="Show user information"),
+        BotCommand(command="admins", description="List group administrators"),
+        BotCommand(command="rules", description="View group rules"),
+        BotCommand(command="notes", description="List saved group notes"),
+        BotCommand(command="get", description="Get a saved note"),
+        BotCommand(command="ping", description="Check bot response"),
+        BotCommand(command="about", description="About this bot"),
         BotCommand(command="help", description="Show bot help"),
         BotCommand(command="admin", description="Open the owner admin panel"),
         BotCommand(command="cancel", description="Cancel an admin action"),

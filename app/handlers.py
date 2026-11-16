@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import asyncio
 import io
 import random
 import re
@@ -18,6 +19,7 @@ from aiogram.types import (
     CallbackQuery,
     ChatPermissions,
     Message,
+    InlineKeyboardButton, InlineKeyboardMarkup,
 )
 
 from .catalog import Catalog, parse_title_lines
@@ -33,7 +35,7 @@ from .keyboards import (
     moderation_settings,
     reply_menu,
 )
-from .moderation import FloodGuard
+from .moderation import FloodGuard, JoinBurstGuard
 from .storage import SQLiteStore
 
 router = Router(name="aniflix-group-bot")
@@ -84,7 +86,8 @@ def muted_permissions() -> ChatPermissions:
 
 
 async def is_panel_admin(user_id: int, store: SQLiteStore, settings: Settings) -> bool:
-    return await store.is_authorized_admin(user_id, settings.owner_ids)
+    # Global controls are reserved for the configured bot owner(s) only.
+    return user_id in settings.owner_ids
 
 
 async def is_chat_admin(message: Message, store: SQLiteStore, settings: Settings) -> bool:
@@ -127,6 +130,68 @@ async def admin_command(message: Message, store: SQLiteStore, settings: Settings
         await message.answer("⛔ You are not authorized to open this panel.")
         return
     await message.answer(root_panel_text(), reply_markup=main_menu())
+
+
+@router.message(Command("broadcast"), F.chat.type == ChatType.PRIVATE)
+async def broadcast_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+    if not message.from_user or message.from_user.id not in settings.owner_ids:
+        return
+    if not message.reply_to_message:
+        await message.answer("Reply to the message you want to broadcast with /broadcast.")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📢 Confirm broadcast", callback_data=f"broadcast:confirm:{message.reply_to_message.message_id}"),
+        InlineKeyboardButton(text="Cancel", callback_data="broadcast:cancel"),
+    ]])
+    groups = await store.list_groups()
+    await message.answer(f"⚠️ Send this message to {len(groups)} registered groups?", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("broadcast:"))
+async def broadcast_callback(callback: CallbackQuery, store: SQLiteStore, settings: Settings) -> None:
+    if not callback.from_user or callback.from_user.id not in settings.owner_ids or callback.message.chat.type != ChatType.PRIVATE:
+        await callback.answer("Owner only", show_alert=True)
+        return
+    if callback.data == "broadcast:cancel":
+        await callback.message.edit_text("Broadcast cancelled.")
+        await callback.answer()
+        return
+    try:
+        message_id = int(callback.data.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Invalid broadcast request", show_alert=True)
+        return
+    groups = await store.list_groups()
+    sent = failed = 0
+    await callback.message.edit_text(f"📢 Broadcasting to {len(groups)} groups...")
+    for group in groups:
+        try:
+            await callback.bot.copy_message(chat_id=group["chat_id"], from_chat_id=callback.message.chat.id, message_id=message_id)
+            sent += 1
+        except Exception as exc:
+            failed += 1
+            logging.getLogger(__name__).warning("Broadcast failed for %s: %s", group["chat_id"], exc)
+        await asyncio.sleep(0.06)
+    await callback.message.edit_text(f"✅ Broadcast finished.\nDelivered: {sent}\nFailed: {failed}\nTotal: {len(groups)}")
+    await callback.answer("Broadcast complete")
+
+
+@router.message(Command("groups"), F.chat.type == ChatType.PRIVATE)
+async def owner_groups_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+    if not message.from_user or message.from_user.id not in settings.owner_ids:
+        return
+    groups = await store.list_groups()
+    lines = [f"{i}. {g['title'] or 'Untitled'} — {g['chat_id']}" for i, g in enumerate(groups, 1)]
+    await message.answer(f"Registered groups: {len(groups)}\n" + ("\n".join(lines[:100]) if lines else "No groups registered yet."))
+
+
+@router.message(Command("stats"), F.chat.type == ChatType.PRIVATE)
+async def owner_stats_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+    if not message.from_user or message.from_user.id not in settings.owner_ids:
+        return
+    stats = await store.get_stats()
+    groups = await store.list_groups()
+    await message.answer(f"📊 Bot statistics\nGroups: {len(groups)}\nMessages seen: {stats.get('messages_seen', 0)}\nAnime matches: {stats.get('anime_matches', 0)}\nConversation replies: {stats.get('conversation_replies', 0)}")
 
 
 @router.message(Command("cancel"))
@@ -470,8 +535,9 @@ def _is_group(message: Message) -> bool:
 async def _handle_group_moderation(message: Message, store: SQLiteStore, settings: Settings, flood: FloodGuard) -> bool:
     if not message.from_user:
         return False
-    current = await store.get_settings()
-    if current.get("anti_link") and message.text and LINK_PATTERN.search(message.text):
+    current = await store.get_group_settings(message.chat.id)
+    defaults = await store.get_settings()
+    if current.get("anti_link", defaults.get("anti_link", False)) and message.text and LINK_PATTERN.search(message.text):
         if not await is_chat_admin(message, store, settings):
             try:
                 await message.delete()
@@ -479,7 +545,7 @@ async def _handle_group_moderation(message: Message, store: SQLiteStore, setting
             except Exception:
                 pass
             return True
-    if current.get("anti_flood") and not await is_chat_admin(message, store, settings):
+    if current.get("anti_flood", defaults.get("anti_flood", True)) and not await is_chat_admin(message, store, settings):
         if flood.is_flooding(message.chat.id, message.from_user.id):
             try:
                 await message.bot.restrict_chat_member(
@@ -495,14 +561,157 @@ async def _handle_group_moderation(message: Message, store: SQLiteStore, setting
     return False
 
 
+@router.my_chat_member()
+async def track_bot_group_membership(event, store: SQLiteStore) -> None:
+    chat = event.chat
+    if chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        return
+    status = event.new_chat_member.status
+    if status in {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR}:
+        await store.register_group(chat.id, chat.title or "", chat.username or "")
+    elif status in {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}:
+        await store.deactivate_group(chat.id)
+
+
 @router.message(Command("help"))
 async def help_command(message: Message) -> None:
     await message.answer(
         "🍥 ANIFLIX GROUP BOT\n\n"
-        "I can check saved Tamil-anime availability, suggest corrected anime titles, chat casually, and react to GIFs/stickers.\n\n"
-        "Admin moderation commands (reply to a member): /warn, /mute, /unmute, /ban.\n"
-        "Panel owners: send /admin in my private chat."
+        "Public: /start /help /ping /id /info /admins /rules /notes /get NAME /about\n"
+        "Group admin: /warn /mute /unmute /ban /unban ID /setrules TEXT /save NAME TEXT /filter WORD = REPLY /stop WORD /antilink on|off /antiflood on|off /antiraid on|off /welcome on|off\n\n"
+        "Only the bot owner can use the private owner panel and global broadcast."
     )
+
+
+@router.message(Command("ping"))
+async def ping_command(message: Message) -> None:
+    await message.answer("🏓 Pong! ANIFLIX bot is responding.")
+
+
+@router.message(Command("id"))
+@router.message(Command("myid"))
+async def id_command(message: Message) -> None:
+    who = f"User ID: {message.from_user.id}\n" if message.from_user else ""
+    await message.answer(f"{who}Chat ID: {message.chat.id}")
+
+
+@router.message(Command("info"))
+async def info_command(message: Message) -> None:
+    target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
+    if target:
+        await message.answer(f"Name: {target.full_name}\nUser ID: {target.id}\nUsername: @{target.username}" if target.username else f"Name: {target.full_name}\nUser ID: {target.id}")
+
+
+@router.message(Command("admins"))
+async def admins_command(message: Message) -> None:
+    if not _is_group(message):
+        return
+    try:
+        admins = await message.bot.get_chat_administrators(message.chat.id)
+        lines = [f"• {a.user.full_name}" + (f" (@{a.user.username})" if a.user.username else "") for a in admins if not a.user.is_bot]
+        await message.answer("👮 Group administrators\n" + ("\n".join(lines) if lines else "No administrators found."))
+    except Exception:
+        await message.answer("I couldn't retrieve the admin list. Please try again later.")
+
+
+@router.message(Command("rules"))
+async def rules_command(message: Message, store: SQLiteStore) -> None:
+    if _is_group(message):
+        await store.register_group(message.chat.id, message.chat.title or "", message.chat.username or "")
+        await message.answer("📜 Group Rules\n\n" + await store.get_rules(message.chat.id))
+
+
+@router.message(Command("setrules"))
+async def set_rules_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+    if not _is_group(message) or not await is_chat_admin(message, store, settings):
+        return
+    rules = (message.text or "").partition(" ")[2].strip()
+    if not rules:
+        await message.reply("Usage: /setrules Write your group rules here")
+        return
+    await store.set_rules(message.chat.id, rules[:4000])
+    await message.answer("✅ This group's rules have been updated.")
+
+
+@router.message(Command("save"))
+async def save_note_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+    if not _is_group(message) or not await is_chat_admin(message, store, settings):
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 3:
+        await message.reply("Usage: /save NAME note content")
+        return
+    await store.save_note(message.chat.id, parts[1], parts[2][:4000])
+    await message.answer(f"✅ Saved note: {parts[1]}")
+
+
+@router.message(Command("get"))
+async def get_note_command(message: Message, store: SQLiteStore) -> None:
+    if not _is_group(message):
+        return
+    name = (message.text or "").partition(" ")[2].strip()
+    if not name:
+        await message.reply("Usage: /get NAME")
+        return
+    note = await store.get_note(message.chat.id, name)
+    await message.answer(note if note else "No note with that name exists in this group.")
+
+
+@router.message(Command("notes"))
+async def notes_command(message: Message, store: SQLiteStore) -> None:
+    if not _is_group(message):
+        return
+    notes = await store.list_notes(message.chat.id)
+    await message.answer("📝 Notes: " + (", ".join(notes) if notes else "No notes saved yet."))
+
+
+@router.message(Command("filter"))
+async def add_filter_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+    if not _is_group(message) or not await is_chat_admin(message, store, settings):
+        return
+    raw = (message.text or "").partition(" ")[2]
+    if "=" not in raw:
+        await message.reply("Usage: /filter keyword = reply")
+        return
+    trigger, reply = (part.strip() for part in raw.split("=", 1))
+    if not trigger or not reply or len(trigger) > 80 or len(reply) > 1000:
+        await message.reply("Please provide a keyword and a reply (maximum 80 and 1000 characters).")
+        return
+    await store.save_filter(message.chat.id, trigger, reply)
+    await message.answer(f"✅ Filter saved for this group: {trigger}")
+
+
+@router.message(Command("stop"))
+async def remove_filter_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+    if not _is_group(message) or not await is_chat_admin(message, store, settings):
+        return
+    trigger = (message.text or "").partition(" ")[2].strip()
+    if not trigger:
+        await message.reply("Usage: /stop keyword")
+        return
+    removed = await store.remove_filter(message.chat.id, trigger)
+    await message.answer("✅ Filter removed." if removed else "No matching filter was found.")
+
+
+@router.message(Command("antilink"))
+@router.message(Command("antiflood"))
+@router.message(Command("welcome"))
+@router.message(Command("antiraid"))
+async def group_toggle_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+    if not _is_group(message) or not await is_chat_admin(message, store, settings):
+        return
+    command, _, value = (message.text or "").partition(" ")
+    key = {"/antilink": "anti_link", "/antiflood": "anti_flood", "/welcome": "welcome_enabled", "/antiraid": "anti_raid"}.get(command.split("@")[0])
+    if not key or value.strip().lower() not in {"on", "off"}:
+        await message.reply("Use /antilink on|off, /antiflood on|off, /antiraid on|off or /welcome on|off")
+        return
+    await store.set_group_setting(message.chat.id, key, value.strip().lower() == "on")
+    await message.answer(f"✅ {command.split()[0]} is now {value.strip().upper()} in this group.")
+
+
+@router.message(Command("about"))
+async def about_command(message: Message) -> None:
+    await message.answer("🍥 ANIFLIX GROUP MANAGEMENT BOT\nPublic multi-group management bot. Group settings are isolated per chat.")
 
 
 @router.message(Command("warn"))
@@ -609,11 +818,15 @@ async def unban_command(message: Message, store: SQLiteStore, settings: Settings
 
 
 @router.message(F.new_chat_members)
-async def welcome_new_members(message: Message, store: SQLiteStore) -> None:
+async def welcome_new_members(message: Message, store: SQLiteStore, raid_guard: JoinBurstGuard) -> None:
     if not _is_group(message):
         return
-    current = await store.get_settings()
-    if not current.get("welcome_enabled", True):
+    await store.register_group(message.chat.id, message.chat.title or "", message.chat.username or "")
+    current = await store.get_group_settings(message.chat.id)
+    defaults = await store.get_settings()
+    if current.get("anti_raid", False) and raid_guard.is_raid(message.chat.id, len(message.new_chat_members)):
+        await message.answer("🚨 Join-burst detected. Group admins should review recent joins. CAPTCHA is not enabled.")
+    if not current.get("welcome_enabled", defaults.get("welcome_enabled", True)):
         return
     for user in message.new_chat_members:
         if user.is_bot:
@@ -631,6 +844,7 @@ async def _process_group_text(
 ) -> None:
     if not _is_group(message) or not message.from_user or message.from_user.is_bot or not message.text:
         return
+    await store.register_group(message.chat.id, message.chat.title or "", message.chat.username or "")
     if message.text.startswith("/"):
         return
     if await _handle_group_moderation(message, store, settings, flood):
@@ -658,8 +872,9 @@ async def _process_group_text(
         await store.increment_stat("anime_matches")
         return
 
-    current = await store.get_settings()
-    if current.get("spelling_correction", True):
+    current = await store.get_group_settings(chat_id)
+    defaults = await store.get_settings()
+    if current.get("spelling_correction", defaults.get("spelling_correction", True)):
         suggestion = catalog.suggest_correction(message.text)
         if suggestion:
             if cooldown.allow(chat_id, user_id, time.monotonic()):
@@ -668,9 +883,13 @@ async def _process_group_text(
                 await store.increment_stat("corrections")
             return
 
-    if not current.get("conversation_enabled", True):
+    filter_reply = await store.get_filter_reply(chat_id, message.text)
+    if filter_reply:
+        await message.reply(filter_reply)
         return
-    # Only user-added trigger/reply pairs in SQLite can produce conversation replies.
+    if chat_id != settings.owner_group_id or not defaults.get("conversation_enabled", True):
+        return
+    # The private conversation library is deliberately restricted to OWNER_GROUP_ID.
     # No hardcoded intent engine or fallback response is used.
     response = await store.get_conversation_reply(message.text)
     if response and cooldown.allow(chat_id, user_id, time.monotonic()):
@@ -795,6 +1014,9 @@ async def group_gif_handler(
 ) -> None:
     if not message.from_user or message.from_user.is_bot:
         return
+    await store.register_group(message.chat.id, message.chat.title or "", message.chat.username or "")
+    if message.chat.id != settings.owner_group_id:
+        return
     if await _handle_group_moderation(message, store, settings, flood):
         return
     current = await store.get_settings()
@@ -815,6 +1037,9 @@ async def group_sticker_handler(
     cooldown: Cooldown, flood: FloodGuard,
 ) -> None:
     if not message.from_user or message.from_user.is_bot:
+        return
+    await store.register_group(message.chat.id, message.chat.title or "", message.chat.username or "")
+    if message.chat.id != settings.owner_group_id:
         return
     if await _handle_group_moderation(message, store, settings, flood):
         return

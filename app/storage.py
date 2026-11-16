@@ -88,6 +88,36 @@ class SQLiteStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_conversation_first_token
                     ON conversation_entries(first_token);
+                CREATE TABLE IF NOT EXISTS registered_groups (
+                    chat_id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL DEFAULT '',
+                    username TEXT NOT NULL DEFAULT '',
+                    active INTEGER NOT NULL DEFAULT 1,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS group_settings (
+                    chat_id INTEGER NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    PRIMARY KEY(chat_id, key)
+                );
+                CREATE TABLE IF NOT EXISTS group_rules (
+                    chat_id INTEGER PRIMARY KEY,
+                    rules TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS group_notes (
+                    chat_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    PRIMARY KEY(chat_id, name)
+                );
+                CREATE TABLE IF NOT EXISTS group_filters (
+                    chat_id INTEGER NOT NULL,
+                    trigger_text TEXT NOT NULL,
+                    reply_text TEXT NOT NULL,
+                    PRIMARY KEY(chat_id, trigger_text)
+                );
                 CREATE TABLE IF NOT EXISTS warnings (
                     chat_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
@@ -407,6 +437,114 @@ class SQLiteStore:
 
     async def get_stats(self) -> dict[str, int]:
         return await self._run(self._get_stats_sync)
+
+    def _register_group_sync(self, chat_id: int, title: str, username: str = "") -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with closing(self._connect()) as conn, conn:
+            conn.execute("""INSERT INTO registered_groups(chat_id,title,username,active,first_seen,last_seen)
+                VALUES(?,?,?,1,?,?) ON CONFLICT(chat_id) DO UPDATE SET
+                title=excluded.title, username=excluded.username, active=1, last_seen=excluded.last_seen""",
+                (int(chat_id), title or "", username or "", now, now))
+
+    async def register_group(self, chat_id: int, title: str, username: str = "") -> None:
+        await self._run(self._register_group_sync, chat_id, title, username)
+
+    def _list_groups_sync(self) -> list[dict[str, Any]]:
+        with closing(self._connect()) as conn, conn:
+            return [dict(r) for r in conn.execute("SELECT * FROM registered_groups WHERE active=1 ORDER BY first_seen")]
+
+    async def list_groups(self) -> list[dict[str, Any]]:
+        return await self._run(self._list_groups_sync)
+
+    def _deactivate_group_sync(self, chat_id: int) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("UPDATE registered_groups SET active=0, last_seen=? WHERE chat_id=?", (datetime.now(timezone.utc).isoformat(), int(chat_id)))
+
+    async def deactivate_group(self, chat_id: int) -> None:
+        await self._run(self._deactivate_group_sync, chat_id)
+
+    def _set_group_setting_sync(self, chat_id: int, key: str, value: Any) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("""INSERT INTO group_settings(chat_id,key,value) VALUES(?,?,?)
+                ON CONFLICT(chat_id,key) DO UPDATE SET value=excluded.value""",
+                (int(chat_id), key, json.dumps(value)))
+
+    async def set_group_setting(self, chat_id: int, key: str, value: Any) -> None:
+        if key not in {"anti_link", "anti_flood", "anti_raid", "welcome_enabled"}:
+            raise ValueError("Unsupported group setting")
+        await self._run(self._set_group_setting_sync, chat_id, key, value)
+
+    def _get_group_settings_sync(self, chat_id: int) -> dict[str, Any]:
+        with closing(self._connect()) as conn, conn:
+            return {r["key"]: json.loads(r["value"]) for r in conn.execute(
+                "SELECT key,value FROM group_settings WHERE chat_id=?", (int(chat_id),))}
+
+    async def get_group_settings(self, chat_id: int) -> dict[str, Any]:
+        return await self._run(self._get_group_settings_sync, chat_id)
+
+    def _set_rules_sync(self, chat_id: int, rules: str) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("INSERT INTO group_rules(chat_id,rules) VALUES(?,?) ON CONFLICT(chat_id) DO UPDATE SET rules=excluded.rules", (int(chat_id), rules))
+
+    async def set_rules(self, chat_id: int, rules: str) -> None:
+        await self._run(self._set_rules_sync, chat_id, rules)
+
+    def _get_rules_sync(self, chat_id: int) -> str:
+        with closing(self._connect()) as conn, conn:
+            row = conn.execute("SELECT rules FROM group_rules WHERE chat_id=?", (int(chat_id),)).fetchone()
+            return row["rules"] if row else "No group rules have been set yet."
+
+    async def get_rules(self, chat_id: int) -> str:
+        return await self._run(self._get_rules_sync, chat_id)
+
+    def _save_note_sync(self, chat_id: int, name: str, content: str) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("INSERT INTO group_notes(chat_id,name,content) VALUES(?,?,?) ON CONFLICT(chat_id,name) DO UPDATE SET content=excluded.content", (int(chat_id), name.casefold(), content))
+
+    async def save_note(self, chat_id: int, name: str, content: str) -> None:
+        await self._run(self._save_note_sync, chat_id, name, content)
+
+    def _get_note_sync(self, chat_id: int, name: str) -> str | None:
+        with closing(self._connect()) as conn, conn:
+            row = conn.execute("SELECT content FROM group_notes WHERE chat_id=? AND name=?", (int(chat_id), name.casefold())).fetchone()
+            return row["content"] if row else None
+
+    async def get_note(self, chat_id: int, name: str) -> str | None:
+        return await self._run(self._get_note_sync, chat_id, name)
+
+    def _list_notes_sync(self, chat_id: int) -> list[str]:
+        with closing(self._connect()) as conn, conn:
+            return [r["name"] for r in conn.execute("SELECT name FROM group_notes WHERE chat_id=? ORDER BY name", (int(chat_id),))]
+
+    async def list_notes(self, chat_id: int) -> list[str]:
+        return await self._run(self._list_notes_sync, chat_id)
+
+    def _save_filter_sync(self, chat_id: int, trigger: str, reply: str) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("INSERT INTO group_filters(chat_id,trigger_text,reply_text) VALUES(?,?,?) ON CONFLICT(chat_id,trigger_text) DO UPDATE SET reply_text=excluded.reply_text", (int(chat_id), trigger.casefold(), reply))
+
+    async def save_filter(self, chat_id: int, trigger: str, reply: str) -> None:
+        await self._run(self._save_filter_sync, chat_id, trigger, reply)
+
+    def _remove_filter_sync(self, chat_id: int, trigger: str) -> bool:
+        with closing(self._connect()) as conn, conn:
+            cur = conn.execute("DELETE FROM group_filters WHERE chat_id=? AND trigger_text=?", (int(chat_id), trigger.casefold()))
+            return cur.rowcount > 0
+
+    async def remove_filter(self, chat_id: int, trigger: str) -> bool:
+        return await self._run(self._remove_filter_sync, chat_id, trigger)
+
+    def _get_filter_sync(self, chat_id: int, text: str) -> str | None:
+        with closing(self._connect()) as conn, conn:
+            rows = conn.execute("SELECT trigger_text,reply_text FROM group_filters WHERE chat_id=? ORDER BY length(trigger_text) DESC", (int(chat_id),)).fetchall()
+            folded = text.casefold()
+            for row in rows:
+                if row["trigger_text"] in folded:
+                    return row["reply_text"]
+            return None
+
+    async def get_filter_reply(self, chat_id: int, text: str) -> str | None:
+        return await self._run(self._get_filter_sync, chat_id, text)
 
     def _add_warning_sync(self, chat_id: int, user_id: int) -> int:
         with closing(self._connect()) as conn, conn:

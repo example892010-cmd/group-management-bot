@@ -16,6 +16,7 @@ class Settings:
     bot_channel_username: str = "@ANIFLIXANIMETAMIL"
     port: int = 10000
     data_dir: Path = Path(".")
+    owner_group_id: int | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -40,4 +41,5 @@ class Settings:
             bot_channel_username=os.getenv("BOT_CHANNEL_USERNAME", "@ANIFLIXANIMETAMIL").strip(),
             port=int(os.getenv("PORT", "10000")),
             data_dir=Path(os.getenv("DATA_DIR", ".")).resolve(),
+            owner_group_id=int(os.getenv("OWNER_GROUP_ID", "0")) or None,
         )

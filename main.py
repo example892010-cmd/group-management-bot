@@ -1,7 +1,4 @@
-"""Root entry point for Render and local execution.
-
-Run the application as a package so app.main relative imports resolve correctly.
-"""
+"""Root entry point for Render and local execution."""
 
 from app.main import run
 

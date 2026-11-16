@@ -15,7 +15,7 @@ def main_menu() -> InlineKeyboardMarkup:
     return keyboard([
         [("🍥 Anime Manager", "panel:anime"), ("💬 Reply Manager", "panel:replies")],
         [("🗣 Conversation Settings", "panel:conversation"), ("🛡 Group Moderation", "panel:moderation")],
-        [("📊 Statistics", "panel:stats"), ("👥 Admin Access", "panel:admins")],
+        [("📊 Statistics", "panel:stats")],
     ])
 
 
