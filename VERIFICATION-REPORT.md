@@ -1,18 +1,24 @@
 # ANIFLIX Group Management Bot — Verification Report
 
-## Local checks performed
+## Local checks performed for this ZIP
 
-- Python syntax compilation: `python -m compileall -q .` — passed.
-- Unit test suite: `pytest -q` — **24 passed**.
-- SQLite multi-group isolation tests: passed for per-group settings, rules, notes, and keyword filters.
-- Conversation library tests: additive import, duplicate handling, phrase matching, 100,000-entry import, export, and clear-confirmation storage behaviour — passed.
-- Moderation tests: anti-flood and join-burst alert guard — passed.
-- Root Render entry point: `main.py` imports `app.main.run` as a package entry point.
+- Python syntax compilation: `python -m compileall -q app tests main.py` — passed.
+- Unit test suite: `pytest -q` — **33 passed**.
+- Command inventory: all requested public/group-admin commands and all requested owner commands are present as handler registrations.
+- SQLite multi-group isolation: group settings, rules, notes, filters, warnings and records are keyed by group ID.
+- SQLite owner controls: unique-user tracking, reports, blocked-group state, maintenance setting and consistent backup are covered by tests.
+- Legacy database migration: the `blocked` field is added in place without dropping existing registered groups.
+- First-run seeding: bundled anime TXT files seed a new database on a separate persistent data mount, while existing mounted snapshots take precedence over repository defaults.
+- Conversation features: additive TXT import, duplicate handling, phrase matching, large imports, export and clear-confirmation storage behaviour are covered by the existing tests.
+- Moderation helpers: anti-flood, join-burst alert, duplicate-message and slowmode helper tests pass.
+- Root Render entry point: `main.py` imports and calls `app.main.run` as a package entry point.
 
-## Important verification limits
+## Verification limits — read before deployment
 
-This environment had no network access and `aiogram` was not installed, so a dependency installation, Telegram API smoke test, and live Render deployment could not be performed here. The ZIP is unit-tested and syntax-checked, but it is **not claimed to be live-Telegram tested**. Install dependencies from `requirements.txt` before running it.
+This build environment has no network access and does not have `aiogram` installed. Therefore dependencies could not be installed here, and I could not run handler-import tests, connect to Telegram, verify real bot permissions, or deploy to Render. The ZIP is syntax-checked and its local unit tests pass, but it is **not represented as live-Telegram or live-Render tested**. Install the packages from `requirements.txt`, then complete a smoke test with your own bot token and a test group.
 
-## Deployment configuration
+## Deployment notes
 
-Set `BOT_TOKEN`, `OWNER_ID`, and `OWNER_GROUP_ID` in Render. `OWNER_GROUP_ID` is the group where the owner's custom conversation library is allowed to reply. Leave it unset to disable group conversation replies. SQLite on Render Free uses ephemeral storage unless a persistent disk is attached; export important conversation data regularly.
+Set `BOT_TOKEN` and `OWNER_ID` in Render. Set `OWNER_GROUP_ID` only if you want anime availability and the private conversation library enabled in one designated group. Leave it blank to disable those owner-group features.
+
+Render Free has ephemeral storage. SQLite files may be lost when the service is replaced, redeployed or spun down. For durable SQLite storage, use a Render service plan that supports a persistent disk and mount it at `/var/data`; set `DATABASE_PATH=/var/data/aniflix_group_management.db` and `DATA_DIR=/var/data`. UptimeRobot monitors availability; it does not make the local database persistent. Use `/backup` and keep downloaded backups in a separate safe location.

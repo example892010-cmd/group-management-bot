@@ -34,6 +34,11 @@ class Settings:
             raise RuntimeError("OWNER_ID must contain numeric Telegram user IDs, separated by commas.") from exc
         if not owner_ids:
             raise RuntimeError("At least one numeric OWNER_ID is required.")
+        owner_group_raw = os.getenv("OWNER_GROUP_ID", "").strip()
+        try:
+            owner_group_id = int(owner_group_raw) if owner_group_raw else None
+        except ValueError as exc:
+            raise RuntimeError("OWNER_GROUP_ID must be a numeric Telegram group ID.") from exc
         return cls(
             bot_token=token,
             database_path=database_path,
@@ -41,5 +46,5 @@ class Settings:
             bot_channel_username=os.getenv("BOT_CHANNEL_USERNAME", "@ANIFLIXANIMETAMIL").strip(),
             port=int(os.getenv("PORT", "10000")),
             data_dir=Path(os.getenv("DATA_DIR", ".")).resolve(),
-            owner_group_id=int(os.getenv("OWNER_GROUP_ID", "0")) or None,
+            owner_group_id=owner_group_id,
         )

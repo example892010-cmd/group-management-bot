@@ -27,15 +27,21 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "tanglish_enabled": True,
     "english_enabled": True,
     "tamil_enabled": True,
+    "maintenance_mode": False,
 }
 
 
 class SQLiteStore:
     """Small async-facing SQLite store; blocking SQLite work runs in worker threads."""
 
-    def __init__(self, database_path: str | Path, data_dir: Path) -> None:
+    def __init__(
+        self, database_path: str | Path, data_dir: Path, seed_dir: Path | None = None
+    ) -> None:
         self.database_path = Path(database_path).expanduser().resolve()
-        self.data_dir = data_dir
+        self.data_dir = Path(data_dir).expanduser().resolve()
+        # Optional read-only source for first-run seed files when DATA_DIR is a
+        # separate persistent mount (for example /var/data on Render).
+        self.seed_dir = Path(seed_dir).expanduser().resolve() if seed_dir else None
         self._catalog_lock = asyncio.Lock()
         self.catalog = Catalog()
 
@@ -93,6 +99,7 @@ class SQLiteStore:
                     title TEXT NOT NULL DEFAULT '',
                     username TEXT NOT NULL DEFAULT '',
                     active INTEGER NOT NULL DEFAULT 1,
+                    blocked INTEGER NOT NULL DEFAULT 0,
                     first_seen TEXT NOT NULL,
                     last_seen TEXT NOT NULL
                 );
@@ -124,7 +131,28 @@ class SQLiteStore:
                     count INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(chat_id, user_id)
                 );
+                CREATE TABLE IF NOT EXISTS seen_users (
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    username TEXT NOT NULL DEFAULT '',
+                    full_name TEXT NOT NULL DEFAULT '',
+                    last_seen TEXT NOT NULL,
+                    PRIMARY KEY(chat_id, user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_seen_users_user ON seen_users(user_id);
+                CREATE TABLE IF NOT EXISTS group_reports (
+                    report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    reporter_id INTEGER NOT NULL,
+                    target_id INTEGER,
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
             """)
+            # In-place migration for databases created by earlier bot versions.
+            group_columns = {row[1] for row in conn.execute("PRAGMA table_info(registered_groups)")}
+            if "blocked" not in group_columns:
+                conn.execute("ALTER TABLE registered_groups ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0")
             for key, value in DEFAULT_SETTINGS.items():
                 conn.execute(
                     "INSERT OR IGNORE INTO bot_settings(key, value) VALUES (?, ?)",
@@ -163,8 +191,12 @@ class SQLiteStore:
             ).fetchall()]
 
     def _read_txt(self, filename: str) -> list[str]:
+        persistent_snapshot = self.data_dir / filename
+        source_path = persistent_snapshot
+        if not source_path.is_file() and self.seed_dir is not None:
+            source_path = self.seed_dir / filename
         try:
-            return parse_title_lines((self.data_dir / filename).read_text(encoding="utf-8"))
+            return parse_title_lines(source_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return []
 
@@ -470,7 +502,14 @@ class SQLiteStore:
                 (int(chat_id), key, json.dumps(value)))
 
     async def set_group_setting(self, chat_id: int, key: str, value: Any) -> None:
-        if key not in {"anti_link", "anti_flood", "anti_raid", "welcome_enabled"}:
+        allowed = {
+            "anti_link", "anti_flood", "anti_raid", "anti_spam", "anti_forward",
+            "anti_bot", "welcome_enabled", "goodbye_enabled", "welcome_text",
+            "goodbye_text", "slowmode_seconds", "lock_all", "lock_media",
+            "lock_stickers", "lock_gifs", "lock_links", "lock_polls",
+            "lock_forwards", "lock_messages", "permissions_baseline",
+        }
+        if key not in allowed:
             raise ValueError("Unsupported group setting")
         await self._run(self._set_group_setting_sync, chat_id, key, value)
 
@@ -518,6 +557,15 @@ class SQLiteStore:
 
     async def list_notes(self, chat_id: int) -> list[str]:
         return await self._run(self._list_notes_sync, chat_id)
+
+    def _list_filters_sync(self, chat_id: int) -> list[str]:
+        with closing(self._connect()) as conn, conn:
+            return [r["trigger_text"] for r in conn.execute(
+                "SELECT trigger_text FROM group_filters WHERE chat_id=? ORDER BY trigger_text", (int(chat_id),)
+            )]
+
+    async def list_filters(self, chat_id: int) -> list[str]:
+        return await self._run(self._list_filters_sync, chat_id)
 
     def _save_filter_sync(self, chat_id: int, trigger: str, reply: str) -> None:
         with closing(self._connect()) as conn, conn:
@@ -578,3 +626,93 @@ class SQLiteStore:
 
     async def warning_count(self, chat_id: int, user_id: int) -> int:
         return await self._run(self._warning_count_sync, chat_id, user_id)
+
+
+    def _record_user_sync(self, chat_id: int, user_id: int, username: str, full_name: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                """INSERT INTO seen_users(chat_id,user_id,username,full_name,last_seen)
+                VALUES(?,?,?,?,?) ON CONFLICT(chat_id,user_id) DO UPDATE SET
+                username=excluded.username, full_name=excluded.full_name, last_seen=excluded.last_seen""",
+                (int(chat_id), int(user_id), username or "", full_name or "", now),
+            )
+
+    async def record_user(self, chat_id: int, user_id: int, username: str = "", full_name: str = "") -> None:
+        await self._run(self._record_user_sync, chat_id, user_id, username, full_name)
+
+    def _user_stats_sync(self) -> tuple[int, list[dict[str, Any]]]:
+        with closing(self._connect()) as conn, conn:
+            count = int(conn.execute("SELECT COUNT(DISTINCT user_id) FROM seen_users").fetchone()[0])
+            rows = [dict(row) for row in conn.execute(
+                "SELECT user_id, username, full_name, MAX(last_seen) AS last_seen "
+                "FROM seen_users GROUP BY user_id ORDER BY last_seen DESC LIMIT 100"
+            ).fetchall()]
+            return count, rows
+
+    async def get_user_stats(self) -> tuple[int, list[dict[str, Any]]]:
+        return await self._run(self._user_stats_sync)
+
+    def _set_group_blocked_sync(self, chat_id: int, blocked: bool) -> bool:
+        with closing(self._connect()) as conn, conn:
+            cur = conn.execute(
+                "UPDATE registered_groups SET blocked=? WHERE chat_id=? AND active=1",
+                (1 if blocked else 0, int(chat_id)),
+            )
+            return cur.rowcount > 0
+
+    async def set_group_blocked(self, chat_id: int, blocked: bool) -> bool:
+        return await self._run(self._set_group_blocked_sync, chat_id, blocked)
+
+    def _is_group_blocked_sync(self, chat_id: int) -> bool:
+        with closing(self._connect()) as conn, conn:
+            row = conn.execute(
+                "SELECT blocked FROM registered_groups WHERE chat_id=? AND active=1", (int(chat_id),)
+            ).fetchone()
+            return bool(row["blocked"]) if row else False
+
+    async def is_group_blocked(self, chat_id: int) -> bool:
+        return await self._run(self._is_group_blocked_sync, chat_id)
+
+    def _add_report_sync(self, chat_id: int, reporter_id: int, target_id: int | None, reason: str) -> int:
+        with closing(self._connect()) as conn, conn:
+            cur = conn.execute(
+                "INSERT INTO group_reports(chat_id,reporter_id,target_id,reason,created_at) VALUES(?,?,?,?,?)",
+                (int(chat_id), int(reporter_id), int(target_id) if target_id is not None else None,
+                 (reason or "")[:1000], datetime.now(timezone.utc).isoformat()),
+            )
+            return int(cur.lastrowid)
+
+    async def add_report(self, chat_id: int, reporter_id: int, target_id: int | None, reason: str = "") -> int:
+        return await self._run(self._add_report_sync, chat_id, reporter_id, target_id, reason)
+
+    def _report_count_sync(self) -> int:
+        with closing(self._connect()) as conn, conn:
+            return int(conn.execute("SELECT COUNT(*) FROM group_reports").fetchone()[0])
+
+    async def count_reports(self) -> int:
+        return await self._run(self._report_count_sync)
+
+    def _list_reports_sync(self, chat_id: int, limit: int) -> list[dict[str, Any]]:
+        with closing(self._connect()) as conn, conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT report_id, reporter_id, target_id, reason, created_at FROM group_reports "
+                "WHERE chat_id=? ORDER BY report_id DESC LIMIT ?", (int(chat_id), max(1, min(int(limit), 50)))
+            ).fetchall()]
+
+    async def list_reports(self, chat_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        return await self._run(self._list_reports_sync, chat_id, limit)
+
+    def _backup_sync(self, destination: Path) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source = sqlite3.connect(str(self.database_path), timeout=30)
+        target = sqlite3.connect(str(destination), timeout=30)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+            source.close()
+        return destination
+
+    async def create_backup(self, destination: str | Path) -> Path:
+        return await self._run(self._backup_sync, Path(destination).expanduser().resolve())

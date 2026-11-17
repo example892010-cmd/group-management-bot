@@ -47,3 +47,36 @@ class JoinBurstGuard:
         self.alerted[chat_id] = current
         bucket.clear()
         return True
+
+
+@dataclass
+class SlowModeGuard:
+    """In-process per-user slowmode; group configuration persists in SQLite."""
+    last_seen: dict[tuple[int, int], float] = field(default_factory=dict)
+
+    def allow(self, chat_id: int, user_id: int, seconds: int, now: float | None = None) -> bool:
+        if seconds <= 0:
+            return True
+        current = time.monotonic() if now is None else now
+        key = (chat_id, user_id)
+        previous = self.last_seen.get(key, float("-inf"))
+        if current - previous < seconds:
+            return False
+        self.last_seen[key] = current
+        return True
+
+
+@dataclass
+class DuplicateGuard:
+    """Detect repeated identical messages from the same user in a short window."""
+    window_seconds: float = 20.0
+    recent: dict[tuple[int, int], tuple[str, float]] = field(default_factory=dict)
+
+    def is_duplicate(self, chat_id: int, user_id: int, text: str, now: float | None = None) -> bool:
+        current = time.monotonic() if now is None else now
+        key = (chat_id, user_id)
+        normalized = " ".join((text or "").casefold().split())
+        previous = self.recent.get(key)
+        duplicate = bool(previous and previous[0] == normalized and current - previous[1] <= self.window_seconds)
+        self.recent[key] = (normalized, current)
+        return duplicate

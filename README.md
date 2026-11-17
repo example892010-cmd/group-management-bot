@@ -1,71 +1,51 @@
-# ANIFLIX Group Management Bot
+# ANIFLIX GROUP MANAGEMENT BOT
 
-A public, multi-group Python Telegram management bot for ANIFLIX NETWORK TAMIL. It combines a TXT-managed anime Tamil-audio catalogue, spelling suggestions, user-managed trigger/reply conversations, optional custom GIF/sticker reactions, a private owner panel, and basic group moderation.
+A public, multi-group Telegram administration bot written in Python with **SQLite only**. Each group has independent rules, filters, notes, warnings, settings, lock flags and moderation records. Global owner commands are protected by `OWNER_ID`; the anime availability catalogue and custom conversation auto-replies are restricted to the one group configured as `OWNER_GROUP_ID`.
 
-Conversation matching is rule-based and uses only admin-supplied trigger/reply entries stored in SQLite. It does **not** use an AI API and does not generate built-in fallback chat replies.
+## Included features
 
-## Features
+- Public commands: `/start`, `/help`, `/id`, `/info`, `/admins`, `/staff`, `/rules`, `/report`, `/ping`, `/about`, `/notes`, `/get`.
+- Group-admin moderation: `/ban`, `/unban`, `/kick`, `/mute`, `/unmute`, `/warn`, `/warnings`, `/resetwarns`, `/purge`, `/pin`, `/unpin`, `/promote`, `/demote`.
+- Welcome/goodbye: `/setwelcome`, `/welcome`, `/resetwelcome`, `/setgoodbye`, `/goodbye`, `/resetgoodbye`.
+- Rules, filters and notes: `/setrules`, `/filter`, `/stop`, `/filters`, `/save`, `/get`, `/notes`.
+- Group protection: `/antispam`, `/antiflood`, `/antilink`, `/antiforward`, `/antibot`, `/lock`, `/unlock`, `/locks`.
+- Group settings: `/settings`, `/setdescription`, `/settitle`, `/slowmode`.
+- Owner-only private commands: `/owner`, `/stats`, `/groups`, `/users`, `/broadcast`, `/blockgroup`, `/unblockgroup`, `/leave`, `/restart`, `/maintenance`, `/disablemaintenance`, `/logs`, `/clearcache`, `/backup`.
+- Owner-group-only features: Tamil anime availability auto-replies, title spelling suggestions, custom TXT trigger/reply responses, and custom conversation library replies. Leaving `OWNER_GROUP_ID` unset disables these group auto-replies.
+- No CAPTCHA. Join-burst alerts can be enabled with `/antiraid on` by a group admin; the bot does not challenge or automatically remove normal members.
+- `/health` and `/` HTTP health endpoints for Render and UptimeRobot.
 
-- Detects saved available and unavailable anime titles inside short messages and longer sentences.
-- Replies to unavailable anime with varied Tanglish messages that include `@ANIFLIXANIMETAMIL`.
-- Replies to available anime with a separate set of messages.
-- Suggests spelling corrections for short title-like messages; correction messages do not include the channel username.
-- Conversation replies come only from trigger/reply pairs that an admin imports or adds. If no saved trigger matches, the bot stays silent.
-- GIF/sticker reactions are sent only when admins have added custom reactions; there are no built-in fallback reactions.
-- Applies a short per-user cooldown.
-- Private admin panel supports bulk add/remove, TXT upload/replace/download, custom replies, settings, statistics and additional panel admins.
-- Public multi-group operation with separately stored group settings, rules, notes and keyword filters.
-- Group moderation: per-group anti-link, anti-flood, alert-based anti-raid (join-burst alerts, no CAPTCHA), welcome toggles, warnings, mute/unmute, ban/unban.
-- Public commands: `/help`, `/ping`, `/id`, `/info`, `/admins`, `/rules`, `/notes`, `/get`, `/about`.
-- Group-admin commands: `/setrules`, `/save`, `/filter`, `/stop`, `/antilink`, `/antiflood`, `/antiraid`, `/welcome`, plus moderation.
-- Owner-only private `/broadcast` with confirmation, `/groups` and `/stats`. Broadcast copies the replied-to message to registered groups.
-- The custom trigger/reply conversation library and its TXT manager are enabled only in the configured owner group (`OWNER_GROUP_ID`); other public groups do not receive those replies.
-- No new-member CAPTCHA is included.
-- SQLite stores the source-of-truth catalogue and settings in one database file. `available_anime.txt` and `unavailable_anime.txt` are synchronized snapshots and can also seed a new database.
-- `/health` endpoint for Render/UptimeRobot monitoring.
+## Permissions
 
-## Project layout
+| Permission level | Access |
+|---|---|
+| Bot owner | Global commands, owner panel, broadcast and registered-group controls. Every global command checks the numeric `OWNER_ID` value and is accepted only in the owner's private chat. |
+| Group administrators | Moderation and settings for the current group only. Telegram admin status is checked using the current group ID. |
+| Group members | Public commands, rules and `/report`. They cannot change settings or moderate members. |
 
-```text
-.
-├── app/
-│   ├── catalog.py
-│   ├── config.py
-│   ├── conversations.py
-│   ├── handlers.py
-│   ├── keyboards.py
-│   ├── main.py
-│   ├── moderation.py
-│   └── storage.py
-├── tests/
-├── available_anime.txt
-├── unavailable_anime.txt
-├── main.py
-├── requirements.txt
-├── requirements-dev.txt
-└── render.yaml
-```
+Adding the bot to a group does not give its admins access to `/owner`, `/stats`, `/broadcast`, or any other global control. Group configuration queries and writes are always scoped by that group's numeric chat ID.
 
 ## Environment variables
 
-Copy `.env.example` to `.env` for local running, or add the same values in Render Environment.
+Copy `.env.example` to `.env` locally, or add the same variables in the Render Environment tab.
 
-| Variable | Required | Description |
+| Variable | Required | Purpose |
 |---|---:|---|
-| `BOT_TOKEN` | Yes | Token generated by Telegram BotFather. Keep it secret. |
-| `OWNER_ID` | Yes | Numeric Telegram user ID. Multiple IDs can be comma-separated. Only these IDs can use global owner controls. |
-| `OWNER_GROUP_ID` | Recommended | Numeric ID of the owner's group. Custom conversation replies and custom GIF/sticker reactions are limited to this group. |
-| `DATABASE_PATH` | No | SQLite database file path; defaults to `./data/aniflix_group_management.db`. |
-| `BOT_CHANNEL_USERNAME` | No | Channel username included in anime availability replies. Defaults to `@ANIFLIXANIMETAMIL`. |
-| `PORT` | No | HTTP health endpoint port. Render sets this automatically. |
-| `DATA_DIR` | No | Directory for synchronized TXT snapshots. Defaults to the project directory. |
-| `LOG_LEVEL` | No | Logging level; defaults to `INFO`. |
+| `BOT_TOKEN` | Yes | BotFather token. Keep it secret. |
+| `OWNER_ID` | Yes | Numeric Telegram user ID allowed to use all global controls. Multiple IDs can be comma-separated. |
+| `OWNER_GROUP_ID` | No, recommended for special features | Numeric group ID where anime availability and custom conversation auto-replies are enabled. Leave blank to disable those features. |
+| `DATABASE_PATH` | No | SQLite file path. Defaults to `./data/aniflix_group_management.db`. |
+| `DATA_DIR` | No | Directory for anime TXT snapshots, database backups and default logs. Defaults to `.`. |
+| `LOG_FILE` | No | Log file path. Defaults to `<DATA_DIR>/logs/aniflix.log`. |
+| `LOG_LEVEL` | No | Logging level, default `INFO`. |
+| `BOT_CHANNEL_USERNAME` | No | Channel included in availability replies. Defaults to `@ANIFLIXANIMETAMIL`. |
+| `PORT` | No | Render provides this automatically; local default is `10000`. |
 
-Do not commit `.env` or expose `BOT_TOKEN` in screenshots or messages.
+Never paste the bot token into a chat or commit a real `.env` file.
 
 ## Run locally
 
-Python 3.12 is configured in `.python-version`.
+Python 3.12 is used by the deployment configuration.
 
 ```bash
 python -m venv .venv
@@ -76,92 +56,68 @@ cp .env.example .env             # Windows: copy .env.example .env
 python main.py
 ```
 
-The bot starts Telegram long polling and an HTTP health endpoint at `/health`.
+The root `main.py` runs the application as a package entry point. The HTTP health route responds at `/health`.
 
 ## Telegram setup
 
-1. Create a bot with [BotFather](https://t.me/BotFather) and put its token in `BOT_TOKEN`.
-2. Set `OWNER_ID` to your numeric Telegram user ID. Usernames are not accepted for authorization because they can change.
-3. Set `OWNER_GROUP_ID` to the numeric ID of your private owner group if you want the custom conversation library active there. Leave it unset to disable group auto-replies.
-4. Add the bot to each group and promote it to administrator with the permissions needed for deleting messages, restricting members, and banning members.
-5. For the bot to read ordinary member messages, use BotFather's `/setprivacy` setting and disable group privacy for this bot, then remove and re-add the bot to the group if Telegram requires it.
-6. The bot needs access to group messages to detect anime names and have conversations. It ignores other bots' messages and its own messages.
-7. Use `/admin` in the bot's private chat to open the owner panel. The owner can reply to a message with `/broadcast` to send it to registered groups; the bot asks for confirmation first.
+1. Create a bot with BotFather and set `BOT_TOKEN`.
+2. Add the numeric owner account to `OWNER_ID`.
+3. Set `OWNER_GROUP_ID` to the numeric ID of the one group allowed to use the anime and custom conversation auto-replies. Do not set it to a public customer group.
+4. Add the bot to groups. Promote it only with the rights needed for the features you want: deleting messages, restricting members, banning members, pinning messages, changing group info and promoting admins.
+5. For ordinary group text processing (anime title detection in the owner group and group filters), disable BotFather privacy mode for the bot. Group membership and privacy settings affect which updates Telegram sends to it.
+6. Group admins can then use the commands shown by `/help`. Telegram still validates the bot's own rights for each action.
 
-## Anime TXT files
+## Owner-group data and anime TXT files
 
-Both files use exactly one title per line:
+The special group reply features run only when `message.chat.id == OWNER_GROUP_ID`. Other groups can still use their own admin-configured `/filter` replies, notes, rules and group protection, but cannot access the owner's anime catalogue or conversation dataset.
 
-- `available_anime.txt`
-- `unavailable_anime.txt`
-
-Blank lines and lines beginning with `#` are ignored. Matching is case-insensitive and ignores punctuation differences. Duplicate lines are removed. A title cannot exist in both lists: when adding/importing, conflicts with the other list are skipped and reported.
-
-The TXT files are synchronized snapshots. SQLite is the source of truth after the first startup. A clean SQLite database is seeded from the two TXT files bundled in the project.
-
-In the private admin panel:
-
-1. Send `/admin`.
-2. Open **Anime Manager**.
-3. Choose Add or Remove Available/Unavailable and send multiple titles, one per line; or upload a `.txt` document to replace a list.
-4. Download either TXT list whenever needed.
-
-Example bulk input:
-
-```text
-Naruto
-Jujutsu Kaisen
-Gintama
-Black Clover
-Solo Leveling
-```
-
-## Moderation commands
-
-Use these commands in a group. For `/warn`, `/mute`, `/unmute` and `/ban`, reply to the target member's message. `/unban USER_ID` takes a numeric Telegram user ID.
-
-- `/warn`
-- `/mute`
-- `/unmute`
-- `/ban`
-- `/unban USER_ID`
-- `/help`
-
-Moderation commands work only for group admins or IDs authorized in the bot's private panel. Telegram bot admin permissions are still required for the actual moderation action.
-
-## Render deployment
-
-1. Push the project to a GitHub repository.
-2. In Render, create a new Blueprint or Web Service from the repository.
-3. Add `BOT_TOKEN` and `OWNER_ID` as secret environment variables.
-4. Set `DATABASE_PATH` to `./data/aniflix_group_management.db` for the default filesystem location.
-5. Deploy. Render uses `python main.py` and checks `/health`.
-6. Add the Render service URL to UptimeRobot as an HTTP(s) monitor for `/health` if you use a monitor to reduce idle time.
-
-The service uses a single SQLite file. Important Render note: the Free plan has an ephemeral filesystem, so this database file can be lost on redeploy/restart. For persistent SQLite storage, attach a paid persistent disk and set `DATABASE_PATH=/var/data/aniflix_group_management.db` and `DATA_DIR=/var/data`.
-
-## Tests
-
-Install development dependencies and run:
-
-```bash
-pip install -r requirements-dev.txt
-pytest -q
-```
-
-The tests cover title parsing, duplicate/conflict handling, bulk removal, exact title matching, fuzzy correction, language/intent detection, response variation, GIF/sticker replies, cooldowns, and anti-flood thresholds. Live Telegram and SQLite integration must be checked with the credentials and group permissions in your own deployment.
-
-
-## Custom conversation replies (TXT)
-
-Edit the files in `conversation_replies/`. Each non-comment line must use:
+Anime lists are one title per line in `available_anime.txt` and `unavailable_anime.txt`. The SQLite database is the source of truth after its first initialization; these files are synchronized snapshots. Custom conversation files in `conversation_replies/*.txt` use this format:
 
 ```text
 trigger phrase = reply text
 ```
 
-Available starter files: `greetings.txt`, `ai_character_replies.txt`, and `funny_replies.txt`. On startup, their entries are imported into SQLite without overwriting existing entries. Use `trigger phrase = reply text`, one pair per line. Matching uses whole-word/whole-phrase boundaries and prefers the longest matching trigger.
+The owner's private `/admin` panel supports conversation TXT import, export, count and clear confirmation. Imports are additive, duplicate entries are skipped, and clearing requires confirmation. Telegram's standard bot file download limit is 20 MB, so split larger TXT files before upload.
 
-For large libraries, open **Admin Panel → Reply Manager → Import 100K+ Conversations TXT** and upload a UTF-8 `.txt` document. Imports are additive: existing trigger/reply pairs are kept, duplicates are skipped, and invalid lines are reported. The admin panel also provides saved-entry count and TXT export. The importer processes entries in batches and stores them in indexed SQLite tables. Telegram's standard bot file-download limit is 20 MB, so split larger files into multiple TXT uploads.
+## Group command notes
 
-**Important:** The bot sends only replies that match entries you added. It does not fall back to built-in conversation, GIF, or sticker replies. If nothing matches, it stays silent. GIF and sticker reactions must also be added by an admin.
+- For `/ban`, `/mute`, `/unmute`, `/warn`, `/kick`, `/pin`, `/promote` and related reply-based actions, reply to the target member's message. Commands that support numeric IDs also accept `USER_ID` where the usage message indicates it.
+- `/report` saves a report in that group. Group admins can review the latest reports with the additional `/reports` command.
+- `/lock` and `/unlock` support `all`, `messages`, `media`, `stickers`, `gifs`, `links`, `polls` and `forwards`. The bot stores each group's lock state separately.
+- `/slowmode SECONDS` enforces a per-user delay of 0–60 seconds using the bot's runtime rate limiter. The configured delay persists; recent timestamps are in memory and reset on restart.
+- `/antiflood` is a per-group setting; the current default is enabled. `/antispam` detects repeated identical messages from the same member within its short runtime window.
+- `/antibot on` attempts to remove bot accounts when they join. This requires the bot to have ban permissions.
+
+## Owner operations
+
+- `/broadcast` must be used in the owner's private chat as a reply to the message to copy. The bot asks for confirmation and skips blocked groups.
+- `/blockgroup GROUP_ID` and `/unblockgroup GROUP_ID` block or restore a registered group.
+- `/leave GROUP_ID` makes the bot leave and marks that group inactive.
+- `/maintenance` temporarily ignores non-owner messages in groups; `/disablemaintenance` resumes processing.
+- `/restart` restarts the Telegram polling session while keeping the web health server and SQLite connection alive.
+- `/backup` creates and sends a consistent SQLite backup. `/logs` sends the current local log file when available.
+- `/users` lists unique user IDs observed in received group updates. It is not a count of every member in each Telegram group; Telegram does not provide a complete member list to ordinary bots.
+
+## Render and UptimeRobot
+
+The included `render.yaml` uses:
+
+- Build command: `pip install -r requirements.txt`
+- Start command: `python main.py`
+- Health check: `/health`
+
+After deployment, set `BOT_TOKEN` and `OWNER_ID`; set `OWNER_GROUP_ID` only if you want the owner-group special features. UptimeRobot can monitor the public service URL at `/health`.
+
+**SQLite persistence warning:** Render Free services use an ephemeral filesystem. The database and log files stored there can be lost when the instance is replaced or redeployed. For persistent SQLite storage, attach a persistent disk on a plan that supports it, then set `DATABASE_PATH=/var/data/aniflix_group_management.db`, `DATA_DIR=/var/data`, and optionally `LOG_FILE=/var/data/logs/aniflix.log`. Do not assume the Free instance's local disk is permanent. Run `/backup` regularly and keep downloaded copies somewhere safe.
+
+## Tests and verification scope
+
+Install the development requirements and run:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+python -m compileall -q app tests main.py
+```
+
+The test suite covers SQLite group isolation, legacy schema migration, users/reports, database backup, anime catalog behaviour, custom conversation import/matching, and moderation helper logic. The Telegram API and Render deployment still need a live smoke test with a real bot token and the correct admin permissions; those credentials are not included in this repository.

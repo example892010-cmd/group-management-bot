@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import asyncio
 import io
 import random
@@ -12,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.filters import Command, StateFilter
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -161,13 +163,32 @@ async def broadcast_callback(callback: CallbackQuery, store: SQLiteStore, settin
     except (ValueError, IndexError):
         await callback.answer("Invalid broadcast request", show_alert=True)
         return
-    groups = await store.list_groups()
+    groups = [group for group in await store.list_groups() if not group.get("blocked", 0)]
     sent = failed = 0
-    await callback.message.edit_text(f"📢 Broadcasting to {len(groups)} groups...")
+    await callback.message.edit_text(f"📢 Broadcasting to {len(groups)} unblocked groups...")
     for group in groups:
         try:
-            await callback.bot.copy_message(chat_id=group["chat_id"], from_chat_id=callback.message.chat.id, message_id=message_id)
+            await callback.bot.copy_message(
+                chat_id=group["chat_id"],
+                from_chat_id=callback.message.chat.id,
+                message_id=message_id,
+            )
             sent += 1
+        except TelegramRetryAfter as exc:
+            # Honour Telegram's rate limit and retry the affected group once.
+            await asyncio.sleep(float(exc.retry_after) + 0.5)
+            try:
+                await callback.bot.copy_message(
+                    chat_id=group["chat_id"],
+                    from_chat_id=callback.message.chat.id,
+                    message_id=message_id,
+                )
+                sent += 1
+            except Exception as retry_exc:
+                failed += 1
+                logging.getLogger(__name__).warning(
+                    "Broadcast retry failed for %s: %s", group["chat_id"], retry_exc
+                )
         except Exception as exc:
             failed += 1
             logging.getLogger(__name__).warning("Broadcast failed for %s: %s", group["chat_id"], exc)
@@ -181,7 +202,7 @@ async def owner_groups_command(message: Message, store: SQLiteStore, settings: S
     if not message.from_user or message.from_user.id not in settings.owner_ids:
         return
     groups = await store.list_groups()
-    lines = [f"{i}. {g['title'] or 'Untitled'} — {g['chat_id']}" for i, g in enumerate(groups, 1)]
+    lines = [f"{i}. {g['title'] or 'Untitled'} — {g['chat_id']} {'[BLOCKED]' if g.get('blocked') else '[ACTIVE]'}" for i, g in enumerate(groups, 1)]
     await message.answer(f"Registered groups: {len(groups)}\n" + ("\n".join(lines[:100]) if lines else "No groups registered yet."))
 
 
@@ -191,7 +212,9 @@ async def owner_stats_command(message: Message, store: SQLiteStore, settings: Se
         return
     stats = await store.get_stats()
     groups = await store.list_groups()
-    await message.answer(f"📊 Bot statistics\nGroups: {len(groups)}\nMessages seen: {stats.get('messages_seen', 0)}\nAnime matches: {stats.get('anime_matches', 0)}\nConversation replies: {stats.get('conversation_replies', 0)}")
+    user_total, _ = await store.get_user_stats()
+    report_total = await store.count_reports()
+    await message.answer(f"📊 Bot statistics\nActive registered groups: {len([g for g in groups if not g.get('blocked')])}\nBlocked groups: {len([g for g in groups if g.get('blocked')])}\nUnique users recorded: {user_total}\nReports saved: {report_total}\nMessages seen: {stats.get('messages_seen', 0)}\nAnime matches: {stats.get('anime_matches', 0)}\nConversation replies: {stats.get('conversation_replies', 0)}")
 
 
 @router.message(Command("cancel"))
@@ -201,9 +224,14 @@ async def cancel_admin_action(message: Message, state: FSMContext) -> None:
 
 
 async def _authorized_callback(callback: CallbackQuery, store: SQLiteStore, settings: Settings) -> bool:
-    if callback.from_user and await is_panel_admin(callback.from_user.id, store, settings):
+    if (
+        callback.from_user
+        and callback.message
+        and callback.message.chat.type == ChatType.PRIVATE
+        and await is_panel_admin(callback.from_user.id, store, settings)
+    ):
         return True
-    await callback.answer("You are not authorized.", show_alert=True)
+    await callback.answer("Owner-only private controls.", show_alert=True)
     return False
 
 
@@ -576,10 +604,13 @@ async def track_bot_group_membership(event, store: SQLiteStore) -> None:
 @router.message(Command("help"))
 async def help_command(message: Message) -> None:
     await message.answer(
-        "🍥 ANIFLIX GROUP BOT\n\n"
-        "Public: /start /help /ping /id /info /admins /rules /notes /get NAME /about\n"
-        "Group admin: /warn /mute /unmute /ban /unban ID /setrules TEXT /save NAME TEXT /filter WORD = REPLY /stop WORD /antilink on|off /antiflood on|off /antiraid on|off /welcome on|off\n\n"
-        "Only the bot owner can use the private owner panel and global broadcast."
+        "🍥 ANIFLIX GROUP MANAGEMENT BOT\n\n"
+        "PUBLIC: /start /help /id /info /admins /staff /rules /report /ping /about /notes /get NAME\n\n"
+        "GROUP ADMIN: /ban /unban /kick /mute /unmute /warn /warnings /resetwarns /purge /pin /unpin /promote /demote\n"
+        "/setwelcome /welcome /resetwelcome /setgoodbye /goodbye /resetgoodbye /setrules /filter /stop /filters /save /get /notes\n"
+        "/antispam /antiflood /antilink /antiforward /antibot /lock /unlock /locks /settings /setdescription /settitle /slowmode\n\n"
+        "BOT OWNER (private chat only): /owner /stats /groups /users /broadcast /blockgroup /unblockgroup /leave /restart /maintenance /disablemaintenance /logs /clearcache /backup\n\n"
+        "Group admin commands are restricted to administrators of that group. Global commands require OWNER_ID."
     )
 
 
@@ -831,7 +862,13 @@ async def welcome_new_members(message: Message, store: SQLiteStore, raid_guard: 
     for user in message.new_chat_members:
         if user.is_bot:
             continue
-        await message.answer(f"🍥 Vanakkam {user.mention_html()}! Welcome to ANIFLIX group! ❤️", parse_mode="HTML")
+        template = current.get("welcome_text", "🍥 Vanakkam {mention}! Welcome to {chat}! ❤️")
+        safe_template = html.escape(template)
+        rendered = safe_template.replace("{mention}", user.mention_html())
+        rendered = rendered.replace("{first}", html.escape(user.first_name))
+        rendered = rendered.replace("{username}", html.escape(user.username or ""))
+        rendered = rendered.replace("{chat}", html.escape(message.chat.title or "this group"))
+        await message.answer(rendered, parse_mode="HTML")
 
 
 async def _process_group_text(
@@ -847,13 +884,11 @@ async def _process_group_text(
     await store.register_group(message.chat.id, message.chat.title or "", message.chat.username or "")
     if message.text.startswith("/"):
         return
-    if await _handle_group_moderation(message, store, settings, flood):
-        return
-    await store.increment_stat("messages_seen")
     user_id = message.from_user.id
     chat_id = message.chat.id
 
-    match = catalog.find_mentioned(message.text)
+    # Tamil anime availability and title lookup are reserved for OWNER_GROUP_ID.
+    match = catalog.find_mentioned(message.text) if chat_id == settings.owner_group_id else None
     if match:
         title, status = match
         if not cooldown.allow(chat_id, user_id, time.monotonic()):
@@ -874,7 +909,7 @@ async def _process_group_text(
 
     current = await store.get_group_settings(chat_id)
     defaults = await store.get_settings()
-    if current.get("spelling_correction", defaults.get("spelling_correction", True)):
+    if chat_id == settings.owner_group_id and current.get("spelling_correction", defaults.get("spelling_correction", True)):
         suggestion = catalog.suggest_correction(message.text)
         if suggestion:
             if cooldown.allow(chat_id, user_id, time.monotonic()):
@@ -1017,8 +1052,6 @@ async def group_gif_handler(
     await store.register_group(message.chat.id, message.chat.title or "", message.chat.username or "")
     if message.chat.id != settings.owner_group_id:
         return
-    if await _handle_group_moderation(message, store, settings, flood):
-        return
     current = await store.get_settings()
     if not current.get("conversation_enabled", True) or not current.get("gif_reactions", True):
         return
@@ -1040,8 +1073,6 @@ async def group_sticker_handler(
         return
     await store.register_group(message.chat.id, message.chat.title or "", message.chat.username or "")
     if message.chat.id != settings.owner_group_id:
-        return
-    if await _handle_group_moderation(message, store, settings, flood):
         return
     current = await store.get_settings()
     if not current.get("conversation_enabled", True) or not current.get("sticker_reactions", True):

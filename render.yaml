@@ -13,7 +13,13 @@ services:
         sync: false
       - key: OWNER_ID
         sync: false
+      - key: OWNER_GROUP_ID
+        sync: false
       - key: DATABASE_PATH
         value: ./data/aniflix_group_management.db
+      - key: DATA_DIR
+        value: .
       - key: BOT_CHANNEL_USERNAME
         value: '@ANIFLIXANIMETAMIL'
+      - key: LOG_LEVEL
+        value: INFO
