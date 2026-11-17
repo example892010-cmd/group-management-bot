@@ -15,7 +15,9 @@ def main_menu() -> InlineKeyboardMarkup:
     return keyboard([
         [("🍥 Anime Manager", "panel:anime"), ("💬 Reply Manager", "panel:replies")],
         [("🗣 Conversation Settings", "panel:conversation"), ("🛡 Group Moderation", "panel:moderation")],
-        [("📊 Statistics", "panel:stats")],
+        [("🎨 Welcome & Photos", "panel:appearance")],
+        [("🌐 Global Owner Tools", "panel:global")],
+        [("👥 Admin Access", "panel:admins"), ("📊 Statistics", "panel:stats")],
     ])
 
 
@@ -88,4 +90,33 @@ def admin_menu() -> InlineKeyboardMarkup:
 def clear_conversations_confirmation() -> InlineKeyboardMarkup:
     return keyboard([
         [("🗑 Yes, clear all", "conversation:clear_confirm"), ("✖️ Cancel", "conversation:clear_cancel")],
+    ])
+
+
+def appearance_menu(settings: dict) -> InlineKeyboardMarkup:
+    welcome_photo = bool(settings.get("welcome_photo_file_id"))
+    command_photo = bool(settings.get("command_photo_file_id"))
+    return keyboard([
+        [("✏️ Edit Welcome Text", "appearance:welcome_text")],
+        [("🖼 Set Welcome Photo", "appearance:welcome_photo"),
+         (("🗑 Remove Welcome Photo" if welcome_photo else "✅ No Welcome Photo"), "appearance:clear_welcome_photo")],
+        [("🌐 Set Photo for Command Replies", "appearance:command_photo")],
+        [(("🗑 Remove Command Photo" if command_photo else "✅ No Command Photo"), "appearance:clear_command_photo")],
+        [("👁 Preview Welcome", "appearance:preview")],
+        [("⬅️ Main Menu", "panel:home")],
+    ])
+
+
+def global_owner_menu(settings: dict) -> InlineKeyboardMarkup:
+    maintenance = bool(settings.get("maintenance_mode", False))
+    maintenance_label = "🛠 Disable Maintenance" if maintenance else "🛠 Enable Maintenance"
+    return keyboard([
+        [("📊 Statistics", "ownerpanel:stats"), ("👥 Groups", "ownerpanel:groups")],
+        [("👤 Users", "ownerpanel:users"), ("📢 Broadcast", "ownerpanel:broadcast")],
+        [("🚫 Block Group", "ownerpanel:block"), ("✅ Unblock Group", "ownerpanel:unblock")],
+        [("🚪 Leave Group", "ownerpanel:leave")],
+        [(maintenance_label, "ownerpanel:maintenance")],
+        [("♻️ Restart", "ownerpanel:restart"), ("🧹 Clear Cache", "ownerpanel:clearcache")],
+        [("📄 Logs", "ownerpanel:logs"), ("💾 Backup", "ownerpanel:backup")],
+        [("⬅️ Main Menu", "panel:home")],
     ])

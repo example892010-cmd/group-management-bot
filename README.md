@@ -1,5 +1,7 @@
 # ANIFLIX GROUP MANAGEMENT BOT
 
+**Build version:** `1.2.0`
+
 A public, multi-group Telegram administration bot written in Python with **SQLite only**. Each group has independent rules, filters, notes, warnings, settings, lock flags and moderation records. Global owner commands are protected by `OWNER_ID`; the anime availability catalogue and custom conversation auto-replies are restricted to the one group configured as `OWNER_GROUP_ID`.
 
 ## Included features
@@ -8,12 +10,25 @@ A public, multi-group Telegram administration bot written in Python with **SQLit
 - Group-admin moderation: `/ban`, `/unban`, `/kick`, `/mute`, `/unmute`, `/warn`, `/warnings`, `/resetwarns`, `/purge`, `/pin`, `/unpin`, `/promote`, `/demote`.
 - Welcome/goodbye: `/setwelcome`, `/welcome`, `/resetwelcome`, `/setgoodbye`, `/goodbye`, `/resetgoodbye`.
 - Rules, filters and notes: `/setrules`, `/filter`, `/stop`, `/filters`, `/save`, `/get`, `/notes`.
-- Group protection: `/antispam`, `/antiflood`, `/antilink`, `/antiforward`, `/antibot`, `/lock`, `/unlock`, `/locks`.
+- Group protection: `/antispam`, `/antiflood`, `/antilink`, `/antiforward`, `/antibot`, `/antiraid`, `/lock`, `/unlock`, `/locks`.
 - Group settings: `/settings`, `/setdescription`, `/settitle`, `/slowmode`.
-- Owner-only private commands: `/owner`, `/stats`, `/groups`, `/users`, `/broadcast`, `/blockgroup`, `/unblockgroup`, `/leave`, `/restart`, `/maintenance`, `/disablemaintenance`, `/logs`, `/clearcache`, `/backup`.
+- Owner-only private commands: `/owner`, `/admin`, `/stats`, `/groups`, `/users`, `/broadcast`, `/blockgroup`, `/unblockgroup`, `/leave`, `/restart`, `/maintenance`, `/disablemaintenance`, `/logs`, `/clearcache`, `/backup`.
+- `/help` opens a compact category menu; tap a category to view only those commands. `/start` includes a visible **Browse Help** inline button. `/owner` and `/admin` open the owner control panel; navigation and management actions are inline-button driven and protected by `OWNER_ID`.
+- `/about` displays the bot owner, developer and quoted version `"1.2.0"`.
 - Owner-group-only features: Tamil anime availability auto-replies, title spelling suggestions, custom TXT trigger/reply responses, and custom conversation library replies. Leaving `OWNER_GROUP_ID` unset disables these group auto-replies.
 - No CAPTCHA. Join-burst alerts can be enabled with `/antiraid on` by a group admin; the bot does not challenge or automatically remove normal members.
 - `/health` and `/` HTTP health endpoints for Render and UptimeRobot.
+
+## Owner panel: welcome and command photos
+
+Open `/owner` (or `/admin`) in the bot private chat. Choose **Welcome & Photos**:
+
+- **Edit Welcome Text** changes the text displayed by `/start`.
+- **Set Welcome Photo** stores a Telegram photo `file_id`; its caption also updates the welcome text when supplied. The welcome photo is used by `/start` and can be previewed or removed from the panel.
+- **Set Photo for Command Replies** stores a shared photo that is attached to text replies generated while slash-command handlers run. For example, `/about` and `/help` show the configured image. Telegram limits photo captions to 1024 characters; longer command responses are sent as the photo followed by the complete text.
+- The global command photo intentionally does not replace the owner panel's editable menu, the `/start` welcome photo, `/broadcast` confirmation controls or `/cancel` responses.
+
+The owner panel also exposes global owner operations—statistics, groups, users, broadcast, block/unblock/leave, maintenance, restart, cache clearing, logs and SQLite backup—through inline buttons.
 
 ## Permissions
 
@@ -86,6 +101,7 @@ The owner's private `/admin` panel supports conversation TXT import, export, cou
 - `/lock` and `/unlock` support `all`, `messages`, `media`, `stickers`, `gifs`, `links`, `polls` and `forwards`. The bot stores each group's lock state separately.
 - `/slowmode SECONDS` enforces a per-user delay of 0–60 seconds using the bot's runtime rate limiter. The configured delay persists; recent timestamps are in memory and reset on restart.
 - `/antiflood` is a per-group setting; the current default is enabled. `/antispam` detects repeated identical messages from the same member within its short runtime window.
+- The bot must be an administrator with the relevant Telegram rights before moderation, pinning, group editing, or lock enforcement can succeed. Telegram admin verification may fail if the bot is not promoted to administrator.
 - `/antibot on` attempts to remove bot accounts when they join. This requires the bot to have ban permissions.
 
 ## Owner operations
@@ -120,4 +136,4 @@ pytest -q
 python -m compileall -q app tests main.py
 ```
 
-The test suite covers SQLite group isolation, legacy schema migration, users/reports, database backup, anime catalog behaviour, custom conversation import/matching, and moderation helper logic. The Telegram API and Render deployment still need a live smoke test with a real bot token and the correct admin permissions; those credentials are not included in this repository.
+The test suite covers SQLite group isolation, legacy schema migration, users/reports, database backup, anime catalog behaviour, custom conversation import/matching, moderation helper logic, and command-route/menu/help consistency. Static command-route tests verify that every required command has exactly one registered handler and appears in the appropriate Telegram menu/help section. See `VERIFICATION-REPORT.md` for the exact checks and the remaining live-test limitations. The Telegram API and Render deployment still need a live smoke test with a real bot token and the correct admin permissions; those credentials are not included in this repository.

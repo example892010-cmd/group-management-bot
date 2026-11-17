@@ -28,6 +28,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "english_enabled": True,
     "tamil_enabled": True,
     "maintenance_mode": False,
+    "welcome_message_text": (
+        "🍥 ANIFLIX GROUP MANAGEMENT BOT\n\n"
+        "Welcome! Use the buttons below to explore the bot.\n"
+        "Add me to your Telegram group to use group-management features.\n\n"
+        "Use /help to browse commands and /about to view bot details."
+    ),
+    "welcome_photo_file_id": "",
+    "command_photo_file_id": "",
 }
 
 

@@ -1,24 +1,41 @@
-# ANIFLIX Group Management Bot — Verification Report
+# ANIFLIX GROUP MANAGEMENT BOT — Verification Report
 
-## Local checks performed for this ZIP
+Build version: `1.2.0`  
+Verification date: `2026-11-17`
 
-- Python syntax compilation: `python -m compileall -q app tests main.py` — passed.
-- Unit test suite: `pytest -q` — **33 passed**.
-- Command inventory: all requested public/group-admin commands and all requested owner commands are present as handler registrations.
-- SQLite multi-group isolation: group settings, rules, notes, filters, warnings and records are keyed by group ID.
-- SQLite owner controls: unique-user tracking, reports, blocked-group state, maintenance setting and consistent backup are covered by tests.
-- Legacy database migration: the `blocked` field is added in place without dropping existing registered groups.
-- First-run seeding: bundled anime TXT files seed a new database on a separate persistent data mount, while existing mounted snapshots take precedence over repository defaults.
-- Conversation features: additive TXT import, duplicate handling, phrase matching, large imports, export and clear-confirmation storage behaviour are covered by the existing tests.
-- Moderation helpers: anti-flood, join-burst alert, duplicate-message and slowmode helper tests pass.
-- Root Render entry point: `main.py` imports and calls `app.main.run` as a package entry point.
+## Automated checks completed
 
-## Verification limits — read before deployment
+| Check | Result |
+|---|---:|
+| Pytest suite | **53 passed** |
+| Python bytecode compilation (`compileall`) | **Passed** |
+| Required public, group-admin and owner command routes | **All audited; no duplicates found** |
+| Command menu / category-help consistency | **Passed** |
+| Owner callback access guard | **Static regression checks passed** |
+| Welcome text/photo and shared command-photo settings | **SQLite persistence test passed** |
+| Owner-only photo-setting callbacks and upload handlers | **Static regression checks passed** |
+| `/start` welcome photo and Help inline-button wiring | **Static regression checks passed** |
+| Shared command-photo middleware conditions | **Static regression checks passed** |
+| About page owner, developer and quoted version | **Passed** |
+| Group settings and content isolation tests | **Passed** |
+| SQLite migration and backup tests | **Passed** |
+| ZIP archive integrity | **Checked after packaging** |
 
-This build environment has no network access and does not have `aiogram` installed. Therefore dependencies could not be installed here, and I could not run handler-import tests, connect to Telegram, verify real bot permissions, or deploy to Render. The ZIP is syntax-checked and its local unit tests pass, but it is **not represented as live-Telegram or live-Render tested**. Install the packages from `requirements.txt`, then complete a smoke test with your own bot token and a test group.
+The suite includes SQLite integration tests and source-level regression checks for Telegram handler wiring. The command-photo request middleware uses aiogram 3.31's documented client-session middleware registration pattern. The `SendPhoto` conversion preserves shared fields such as reply markup, reply parameters, parse mode and message thread information. Responses longer than Telegram's 1024-character photo-caption limit are sent as a photo followed by the complete text.
 
-## Deployment notes
+## Presentation and owner-panel changes
 
-Set `BOT_TOKEN` and `OWNER_ID` in Render. Set `OWNER_GROUP_ID` only if you want anime availability and the private conversation library enabled in one designated group. Leave it blank to disable those owner-group features.
+- `/owner` and `/admin` open the same private owner panel. Owner navigation and global management functions are exposed through inline buttons.
+- The owner panel includes appearance controls for the `/start` welcome text/photo and a shared photo for slash-command text replies.
+- `/start` displays the configured welcome photo and caption when available. Its inline keyboard includes **Browse Help**.
+- `/help` includes inline category buttons. When its output is a photo caption, category navigation edits the caption rather than trying to edit the photo message as text.
+- The shared command photo appears with text responses to commands such as `/about` and `/help`. It intentionally does not replace the editable owner panel, the separately configured `/start` welcome photo, `/broadcast` confirmation controls or `/cancel` responses.
+- `/about` displays Owner and Developer as `@TANJIROKAMADO404` and the quoted version as `"1.2.0"`.
 
-Render Free has ephemeral storage. SQLite files may be lost when the service is replaced, redeployed or spun down. For durable SQLite storage, use a Render service plan that supports a persistent disk and mount it at `/var/data`; set `DATABASE_PATH=/var/data/aniflix_group_management.db` and `DATA_DIR=/var/data`. UptimeRobot monitors availability; it does not make the local database persistent. Use `/backup` and keep downloaded backups in a separate safe location.
+## Checks not possible in this environment
+
+A live Telegram Bot API smoke test and Render deployment test were **not performed**. This workspace has no bot token and could not reach PyPI to install aiogram, so the Telegram application modules were syntax-checked and audited but not imported/executed through the actual aiogram runtime in this environment. The official aiogram 3.31 documentation was checked for the client-session middleware registration API and `SendPhoto` caption behavior.
+
+Before production use, install `requirements.txt`, start the bot with real environment variables, then test `/owner`, the appearance buttons, `/start`, `/help`, `/about`, command-photo clearing, all owner panel actions, and the group commands in a test group where the bot has the required administrator rights.
+
+Keep your current SQLite database and backups when updating the deployed service. This source ZIP does not contain or replace your deployed database.

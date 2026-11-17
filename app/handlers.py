@@ -36,8 +36,11 @@ from .keyboards import (
     main_menu,
     moderation_settings,
     reply_menu,
+    appearance_menu,
+    global_owner_menu,
 )
 from .moderation import FloodGuard, JoinBurstGuard
+from .presentation import about_text
 from .storage import SQLiteStore
 
 router = Router(name="aniflix-group-bot")
@@ -51,6 +54,11 @@ class AdminFlow(StatesGroup):
     waiting_remove_reply = State()
     waiting_admin_id = State()
     waiting_remove_admin_id = State()
+    waiting_welcome_photo = State()
+    waiting_welcome_text = State()
+    waiting_command_photo = State()
+    waiting_owner_group_id = State()
+    waiting_broadcast_content = State()
 
 
 UNAVAILABLE_REPLIES = [
@@ -93,34 +101,32 @@ async def is_panel_admin(user_id: int, store: SQLiteStore, settings: Settings) -
 
 
 async def is_chat_admin(message: Message, store: SQLiteStore, settings: Settings) -> bool:
+    """Check the sender's role in this chat and explain failed verification."""
     if message.from_user and await is_panel_admin(message.from_user.id, store, settings):
         return True
     if not message.from_user:
+        await message.reply("⚠️ Telegram did not provide a user account for this command.")
         return False
     try:
         member = await message.bot.get_chat_member(message.chat.id, message.from_user.id)
-        return member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Could not verify admin status for %s in %s: %s",
+            message.from_user.id, message.chat.id, exc,
+        )
+        await message.reply(
+            "⚠️ I couldn't verify your group-admin status. Please make sure I am "
+            "an administrator in this group, then try again."
+        )
         return False
+    if member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
+        await message.reply("⛔ Only administrators of this group can use that command.")
+        return False
+    return True
 
 
 def root_panel_text() -> str:
     return "🍥 ANIFLIX GROUP BOT\n\nChoose a section to manage the bot."
-
-
-@router.message(Command("myid"))
-async def my_id_command(message: Message) -> None:
-    if message.from_user:
-        await message.answer(f"Your Telegram user ID: {message.from_user.id}")
-
-
-@router.message(Command("start"), StateFilter(None))
-async def start_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
-    if message.chat.type == ChatType.PRIVATE:
-        if message.from_user and await is_panel_admin(message.from_user.id, store, settings):
-            await message.answer("🍥 Welcome to ANIFLIX Group Bot.\n\nUse /admin to open the control panel.")
-        else:
-            await message.answer("🍥 ANIFLIX Group Bot is active in its groups.")
 
 
 @router.message(Command("admin"), StateFilter(None))
@@ -137,6 +143,7 @@ async def admin_command(message: Message, store: SQLiteStore, settings: Settings
 @router.message(Command("broadcast"), F.chat.type == ChatType.PRIVATE)
 async def broadcast_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
     if not message.from_user or message.from_user.id not in settings.owner_ids:
+        await message.answer("⛔ This command is restricted to the bot owner.")
         return
     if not message.reply_to_message:
         await message.answer("Reply to the message you want to broadcast with /broadcast.")
@@ -200,6 +207,7 @@ async def broadcast_callback(callback: CallbackQuery, store: SQLiteStore, settin
 @router.message(Command("groups"), F.chat.type == ChatType.PRIVATE)
 async def owner_groups_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
     if not message.from_user or message.from_user.id not in settings.owner_ids:
+        await message.answer("⛔ This command is restricted to the bot owner.")
         return
     groups = await store.list_groups()
     lines = [f"{i}. {g['title'] or 'Untitled'} — {g['chat_id']} {'[BLOCKED]' if g.get('blocked') else '[ACTIVE]'}" for i, g in enumerate(groups, 1)]
@@ -209,6 +217,7 @@ async def owner_groups_command(message: Message, store: SQLiteStore, settings: S
 @router.message(Command("stats"), F.chat.type == ChatType.PRIVATE)
 async def owner_stats_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
     if not message.from_user or message.from_user.id not in settings.owner_ids:
+        await message.answer("⛔ This command is restricted to the bot owner.")
         return
     stats = await store.get_stats()
     groups = await store.list_groups()
@@ -267,6 +276,22 @@ async def panel_navigation(callback: CallbackQuery, state: FSMContext, store: SQ
             f"🎞 Media reactions: {stats.get('media_reactions', 0)}"
         )
         await callback.message.edit_text(text, reply_markup=back_home())
+    elif action == "global":
+        await callback.message.edit_text(
+            "🌐 <b>Global Owner Tools</b>\n\n"
+            "Manage registered groups, owner announcements, maintenance, backups and runtime operations.",
+            reply_markup=global_owner_menu(await store.get_settings()),
+            parse_mode="HTML",
+        )
+    elif action == "appearance":
+        await callback.message.edit_text(
+            "🎨 <b>Welcome &amp; Command Photos</b>\n\n"
+            "Welcome photo: used by /start.\n"
+            "Command photo: attached to command text replies, including /about and /help.\n\n"
+            "Use the buttons below to configure both settings.",
+            reply_markup=appearance_menu(await store.get_settings()),
+            parse_mode="HTML",
+        )
     elif action == "admins":
         await callback.message.edit_text("👥 Admin Access\nOnly the owner can add or remove panel admins.", reply_markup=admin_menu())
     elif action == "modhelp":
@@ -281,6 +306,342 @@ async def panel_navigation(callback: CallbackQuery, state: FSMContext, store: SQ
         )
         await callback.message.edit_text(text, reply_markup=moderation_settings(await store.get_settings()))
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ownerpanel:") & ~F.data.startswith("ownerpanel:broadcast_"))
+async def owner_panel_actions(
+    callback: CallbackQuery, state: FSMContext, store: SQLiteStore, settings: Settings,
+    runtime_control=None, flood=None, raid_guard=None, cooldown=None, slow_guard=None,
+    duplicate_guard=None, protection_middleware=None,
+) -> None:
+    if not await _authorized_callback(callback, store, settings):
+        return
+    action = callback.data.split(":", 1)[1]
+    if action == "stats":
+        stats = await store.get_stats()
+        groups = await store.list_groups()
+        user_total, _ = await store.get_user_stats()
+        report_total = await store.count_reports()
+        text = (
+            "📊 <b>Bot Statistics</b>\n\n"
+            f"Active groups: {sum(not bool(g.get('blocked')) for g in groups)}\n"
+            f"Blocked groups: {sum(bool(g.get('blocked')) for g in groups)}\n"
+            f"Recorded users: {user_total}\nReports: {report_total}\n"
+            f"Messages: {stats.get('messages_seen', 0)}\n"
+            f"Anime matches: {stats.get('anime_matches', 0)}\n"
+            f"Conversation replies: {stats.get('conversation_replies', 0)}"
+        )
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=global_owner_menu(await store.get_settings()))
+    elif action == "groups":
+        groups = await store.list_groups()
+        lines = [
+            f"{index}. {group['title'] or 'Untitled'} · {group['chat_id']} · "
+            f"{'BLOCKED' if group.get('blocked') else 'ACTIVE'}"
+            for index, group in enumerate(groups[:35], 1)
+        ]
+        text = f"👥 <b>Registered Groups ({len(groups)})</b>\n\n" + ("\n".join(lines) if lines else "No groups registered yet.") + (f"\n\nShowing first {len(lines)} groups." if len(groups) > len(lines) else "")
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=global_owner_menu(await store.get_settings()))
+    elif action == "users":
+        total, users = await store.get_user_stats()
+        lines = [
+            f"{index}. {user['full_name'] or 'Unknown'} · {user['user_id']}"
+            + (f" · @{user['username']}" if user['username'] else "")
+            for index, user in enumerate(users[:40], 1)
+        ]
+        text = f"👤 <b>Recorded Users: {total}</b>\n\n" + ("\n".join(lines) if lines else "No users recorded yet.")
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=global_owner_menu(await store.get_settings()))
+    elif action == "broadcast":
+        await state.set_state(AdminFlow.waiting_broadcast_content)
+        await callback.message.answer(
+            "📢 Send the message you want to broadcast to all unblocked registered groups.\n\n"
+            "Photos, videos, documents and text are supported. You will get a confirmation button before sending. Use /cancel to stop."
+        )
+    elif action in {"block", "unblock", "leave"}:
+        await state.set_state(AdminFlow.waiting_owner_group_id)
+        await state.update_data(owner_group_action=action)
+        label = {"block": "block", "unblock": "unblock", "leave": "make the bot leave"}[action]
+        await callback.message.answer(f"Send the numeric Telegram group ID to {label}.\n\nUse /cancel to stop.")
+    elif action == "maintenance":
+        current = await store.get_settings()
+        new_value = not bool(current.get("maintenance_mode", False))
+        await store.set_setting("maintenance_mode", new_value)
+        status = "enabled" if new_value else "disabled"
+        await callback.message.edit_text(
+            f"🛠 Maintenance mode {status}.",
+            reply_markup=global_owner_menu(await store.get_settings()),
+        )
+    elif action == "restart":
+        if runtime_control is None:
+            await callback.answer("Restart control is unavailable.", show_alert=True)
+            return
+        await callback.message.answer("♻️ Restart requested. Polling will reconnect; SQLite data remains untouched.")
+        runtime_control.request_restart()
+    elif action == "clearcache":
+        for obj, field_names in ((flood, ("recent",)), (raid_guard, ("recent", "alerted")),
+                                 (cooldown, ("_last",)), (slow_guard, ("last_seen",)),
+                                 (duplicate_guard, ("recent",))):
+            if obj is None:
+                continue
+            for field in field_names:
+                cache = getattr(obj, field, None)
+                if hasattr(cache, "clear"):
+                    cache.clear()
+        if protection_middleware is not None:
+            cache = getattr(protection_middleware, "admin_cache", None)
+            if hasattr(cache, "clear"):
+                cache.clear()
+        await callback.message.answer("🧹 In-memory caches cleared. SQLite records were not changed.")
+    elif action == "backup":
+        from datetime import datetime, timezone
+        from pathlib import Path
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        try:
+            path = await store.create_backup(Path(settings.data_dir) / "backups" / f"aniflix_sqlite_backup_{stamp}.db")
+            await callback.message.answer_document(
+                BufferedInputFile(path.read_bytes(), filename=path.name),
+                caption="✅ SQLite backup created. The live database was not modified.",
+            )
+        except Exception as exc:
+            log.exception("Owner-panel SQLite backup failed")
+            await callback.message.answer(f"⚠️ Backup failed: {type(exc).__name__}")
+    elif action == "logs":
+        import os
+        from pathlib import Path
+        log_path = Path(os.getenv("LOG_FILE", str(Path(settings.data_dir) / "logs" / "aniflix.log")))
+        if not log_path.is_file() or not log_path.stat().st_size:
+            await callback.message.answer("No local log file is available yet. Check the Render service logs.")
+        else:
+            data = log_path.read_bytes()[-(1024 * 1024):]
+            await callback.message.answer_document(
+                BufferedInputFile(data, filename="aniflix_recent_logs.txt"),
+                caption="Latest application log output (up to 1 MB).",
+            )
+    await callback.answer()
+
+
+@router.message(AdminFlow.waiting_owner_group_id, F.chat.type == ChatType.PRIVATE, F.text)
+async def receive_owner_group_id(
+    message: Message, state: FSMContext, store: SQLiteStore, settings: Settings
+) -> None:
+    if not message.from_user or not await is_panel_admin(message.from_user.id, store, settings):
+        await state.clear()
+        return
+    raw = (message.text or "").strip()
+    if not raw.lstrip("-").isdigit():
+        await message.answer("Please send a numeric group ID, or use /cancel.")
+        return
+    group_id = int(raw)
+    action = (await state.get_data()).get("owner_group_action")
+    await state.clear()
+    if action == "block":
+        changed = await store.set_group_blocked(group_id, True)
+        result = "✅ Group blocked." if changed else "No registered group with that ID was found."
+    elif action == "unblock":
+        changed = await store.set_group_blocked(group_id, False)
+        result = "✅ Group unblocked." if changed else "No registered group with that ID was found."
+    elif action == "leave":
+        try:
+            await message.bot.leave_chat(group_id)
+            await store.deactivate_group(group_id)
+            result = "✅ Bot left the group and marked it inactive."
+        except Exception as exc:
+            log.warning("Panel leave failed for %s: %s", group_id, exc)
+            result = "⚠️ Could not leave that group. Check the ID and bot membership."
+    else:
+        result = "⚠️ Unknown owner-panel action."
+    await message.answer(result, reply_markup=main_menu())
+
+
+@router.message(AdminFlow.waiting_broadcast_content, F.chat.type == ChatType.PRIVATE)
+async def receive_owner_broadcast_content(
+    message: Message, state: FSMContext, settings: Settings
+) -> None:
+    if not message.from_user or message.from_user.id not in settings.owner_ids:
+        await state.clear()
+        return
+    if message.text and message.text.startswith("/cancel"):
+        await state.clear()
+        await message.answer("✅ Broadcast cancelled.", reply_markup=main_menu())
+        return
+    await state.clear()
+    markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📢 Confirm Broadcast", callback_data=f"ownerpanel:broadcast_confirm:{message.message_id}"),
+        InlineKeyboardButton(text="✖️ Cancel", callback_data="ownerpanel:broadcast_cancel"),
+    ]])
+    await message.answer("⚠️ Broadcast this message to all unblocked registered groups?", reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("ownerpanel:broadcast_"))
+async def owner_panel_broadcast_confirm(
+    callback: CallbackQuery, store: SQLiteStore, settings: Settings
+) -> None:
+    if not await _authorized_callback(callback, store, settings):
+        return
+    if callback.data == "ownerpanel:broadcast_cancel":
+        await callback.message.edit_text("Broadcast cancelled.", reply_markup=main_menu())
+        await callback.answer()
+        return
+    try:
+        message_id = int(callback.data.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Invalid broadcast request.", show_alert=True)
+        return
+    groups = [group for group in await store.list_groups() if not group.get("blocked", 0)]
+    sent = failed = 0
+    await callback.message.edit_text(f"📢 Broadcasting to {len(groups)} unblocked groups...")
+    for group in groups:
+        try:
+            await callback.bot.copy_message(
+                chat_id=group["chat_id"], from_chat_id=callback.message.chat.id, message_id=message_id
+            )
+            sent += 1
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(float(exc.retry_after) + 0.5)
+            try:
+                await callback.bot.copy_message(
+                    chat_id=group["chat_id"], from_chat_id=callback.message.chat.id, message_id=message_id
+                )
+                sent += 1
+            except Exception as retry_exc:
+                failed += 1
+                log.warning("Owner-panel broadcast retry failed for %s: %s", group["chat_id"], retry_exc)
+        except Exception as exc:
+            failed += 1
+            log.warning("Owner-panel broadcast failed for %s: %s", group["chat_id"], exc)
+        await asyncio.sleep(0.06)
+    await callback.message.edit_text(
+        f"✅ Broadcast finished.\nDelivered: {sent}\nFailed: {failed}\nTotal: {len(groups)}",
+        reply_markup=main_menu(),
+    )
+    await callback.answer("Broadcast finished.")
+
+
+@router.callback_query(F.data.startswith("appearance:"))
+async def appearance_actions(
+    callback: CallbackQuery, state: FSMContext, store: SQLiteStore, settings: Settings
+) -> None:
+    if not await _authorized_callback(callback, store, settings):
+        return
+    action = callback.data.split(":", 1)[1]
+    if action == "welcome_text":
+        await state.set_state(AdminFlow.waiting_welcome_text)
+        await callback.message.answer(
+            "✏️ Send the new /start welcome text. It will be displayed with the welcome photo if one is set.\n\n"
+            "Send /cancel to keep the current text."
+        )
+    elif action == "welcome_photo":
+        await state.set_state(AdminFlow.waiting_welcome_photo)
+        await callback.message.answer(
+            "🖼 Send the welcome photo. You may add a caption to update the welcome text too.\n\n"
+            "Send /cancel to stop."
+        )
+    elif action == "command_photo":
+        await state.set_state(AdminFlow.waiting_command_photo)
+        await callback.message.answer(
+            "🌐 Send the photo to attach to command text replies, such as /about and /help.\n\n"
+            "Send /cancel to stop."
+        )
+    elif action == "clear_welcome_photo":
+        await store.set_setting("welcome_photo_file_id", "")
+        await callback.message.edit_text(
+            "✅ Welcome photo removed. The welcome text will be sent as a normal message.",
+            reply_markup=appearance_menu(await store.get_settings()),
+        )
+    elif action == "clear_command_photo":
+        await store.set_setting("command_photo_file_id", "")
+        await callback.message.edit_text(
+            "✅ Shared command photo removed. Command replies will be text-only.",
+            reply_markup=appearance_menu(await store.get_settings()),
+        )
+    elif action == "preview":
+        current = await store.get_settings()
+        text = str(current.get("welcome_message_text") or "Welcome to ANIFLIX!")
+        photo_id = current.get("welcome_photo_file_id") or ""
+        if photo_id:
+            await callback.message.answer_photo(
+                photo=photo_id, caption=text[:1024],
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="❓ Help", callback_data="help:home")
+                ]]),
+            )
+            if len(text) > 1024:
+                await callback.message.answer(text[1024:])
+        else:
+            await callback.message.answer(
+                text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="❓ Help", callback_data="help:home")
+                ]]),
+            )
+    await callback.answer()
+
+
+@router.message(AdminFlow.waiting_welcome_photo, F.chat.type == ChatType.PRIVATE, F.photo)
+async def receive_welcome_photo(
+    message: Message, state: FSMContext, store: SQLiteStore, settings: Settings
+) -> None:
+    if not message.from_user or not await is_panel_admin(message.from_user.id, store, settings):
+        await state.clear()
+        return
+    if not message.photo:
+        await message.answer("Please send a photo, or use /cancel.")
+        return
+    await store.set_setting("welcome_photo_file_id", message.photo[-1].file_id)
+    if message.caption and message.caption.strip():
+        await store.set_setting("welcome_message_text", message.caption.strip())
+    await state.clear()
+    await message.answer(
+        "✅ Welcome photo saved." + (" The caption was also saved as the welcome text." if message.caption else " Your existing welcome text was kept.") ,
+        reply_markup=main_menu(),
+    )
+
+
+@router.message(AdminFlow.waiting_welcome_photo, F.chat.type == ChatType.PRIVATE)
+async def waiting_for_welcome_photo(message: Message) -> None:
+    await message.answer("Please send a photo, optionally with a caption, or use /cancel.")
+
+
+@router.message(AdminFlow.waiting_command_photo, F.chat.type == ChatType.PRIVATE, F.photo)
+async def receive_command_photo(
+    message: Message, state: FSMContext, store: SQLiteStore, settings: Settings
+) -> None:
+    if not message.from_user or not await is_panel_admin(message.from_user.id, store, settings):
+        await state.clear()
+        return
+    if not message.photo:
+        await message.answer("Please send a photo, or use /cancel.")
+        return
+    await store.set_setting("command_photo_file_id", message.photo[-1].file_id)
+    await state.clear()
+    await message.answer(
+        "✅ Shared command photo saved. It will now appear with command text replies, including /about and /help.",
+        reply_markup=main_menu(),
+    )
+
+
+@router.message(AdminFlow.waiting_command_photo, F.chat.type == ChatType.PRIVATE)
+async def waiting_for_command_photo(message: Message) -> None:
+    await message.answer("Please send a photo, or use /cancel.")
+
+
+@router.message(AdminFlow.waiting_welcome_text, F.chat.type == ChatType.PRIVATE, F.text)
+async def receive_welcome_text(
+    message: Message, state: FSMContext, store: SQLiteStore, settings: Settings
+) -> None:
+    if not message.from_user or not await is_panel_admin(message.from_user.id, store, settings):
+        await state.clear()
+        return
+    text = (message.text or "").strip()
+    if not text or len(text) > 4096:
+        await message.answer("Please send welcome text between 1 and 4096 characters, or use /cancel.")
+        return
+    await store.set_setting("welcome_message_text", text)
+    await state.clear()
+    await message.answer("✅ Welcome text saved.", reply_markup=main_menu())
+
+
+@router.message(AdminFlow.waiting_welcome_text, F.chat.type == ChatType.PRIVATE)
+async def waiting_for_welcome_text(message: Message) -> None:
+    await message.answer("Please send plain welcome text, or use /cancel.")
 
 
 @router.callback_query(F.data.startswith("anime:"))
@@ -601,19 +962,6 @@ async def track_bot_group_membership(event, store: SQLiteStore) -> None:
         await store.deactivate_group(chat.id)
 
 
-@router.message(Command("help"))
-async def help_command(message: Message) -> None:
-    await message.answer(
-        "🍥 ANIFLIX GROUP MANAGEMENT BOT\n\n"
-        "PUBLIC: /start /help /id /info /admins /staff /rules /report /ping /about /notes /get NAME\n\n"
-        "GROUP ADMIN: /ban /unban /kick /mute /unmute /warn /warnings /resetwarns /purge /pin /unpin /promote /demote\n"
-        "/setwelcome /welcome /resetwelcome /setgoodbye /goodbye /resetgoodbye /setrules /filter /stop /filters /save /get /notes\n"
-        "/antispam /antiflood /antilink /antiforward /antibot /lock /unlock /locks /settings /setdescription /settitle /slowmode\n\n"
-        "BOT OWNER (private chat only): /owner /stats /groups /users /broadcast /blockgroup /unblockgroup /leave /restart /maintenance /disablemaintenance /logs /clearcache /backup\n\n"
-        "Group admin commands are restricted to administrators of that group. Global commands require OWNER_ID."
-    )
-
-
 @router.message(Command("ping"))
 async def ping_command(message: Message) -> None:
     await message.answer("🏓 Pong! ANIFLIX bot is responding.")
@@ -724,25 +1072,9 @@ async def remove_filter_command(message: Message, store: SQLiteStore, settings: 
     await message.answer("✅ Filter removed." if removed else "No matching filter was found.")
 
 
-@router.message(Command("antilink"))
-@router.message(Command("antiflood"))
-@router.message(Command("welcome"))
-@router.message(Command("antiraid"))
-async def group_toggle_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
-    if not _is_group(message) or not await is_chat_admin(message, store, settings):
-        return
-    command, _, value = (message.text or "").partition(" ")
-    key = {"/antilink": "anti_link", "/antiflood": "anti_flood", "/welcome": "welcome_enabled", "/antiraid": "anti_raid"}.get(command.split("@")[0])
-    if not key or value.strip().lower() not in {"on", "off"}:
-        await message.reply("Use /antilink on|off, /antiflood on|off, /antiraid on|off or /welcome on|off")
-        return
-    await store.set_group_setting(message.chat.id, key, value.strip().lower() == "on")
-    await message.answer(f"✅ {command.split()[0]} is now {value.strip().upper()} in this group.")
-
-
 @router.message(Command("about"))
 async def about_command(message: Message) -> None:
-    await message.answer("🍥 ANIFLIX GROUP MANAGEMENT BOT\nPublic multi-group management bot. Group settings are isolated per chat.")
+    await message.answer(about_text(), parse_mode="HTML")
 
 
 @router.message(Command("warn"))

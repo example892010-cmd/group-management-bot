@@ -17,7 +17,9 @@ from aiogram.types import (
     BotCommandScopeChat,
 )
 
+from .command_catalog import group_command_pairs, owner_command_pairs, PRIVATE_COMMANDS
 from .config import Settings
+from .command_photo import CommandPhotoApiMiddleware, CommandRequestContextMiddleware
 from .conversations import Cooldown
 from .extra_handlers import router as extra_router
 from .handlers import router as main_router
@@ -55,50 +57,15 @@ async def health_handler(_: web.Request) -> web.Response:
 
 
 def group_commands() -> list[BotCommand]:
-    commands = [
-        ("start", "Start the bot"), ("help", "Show all commands"),
-        ("id", "Show user and group IDs"), ("info", "Show user information"),
-        ("admins", "List group administrators"), ("staff", "List group staff"),
-        ("rules", "View group rules"), ("report", "Report a message or member"), ("reports", "Review reports (admins)"),
-        ("ping", "Check bot response"), ("about", "About this bot"),
-        ("ban", "Ban a member (reply)"), ("unban", "Unban by user ID"),
-        ("kick", "Remove a member (reply or ID)"), ("mute", "Mute a member (reply)"),
-        ("unmute", "Unmute a member (reply)"), ("warn", "Warn a member (reply)"),
-        ("warnings", "View a member's warnings"), ("resetwarns", "Clear a member's warnings"),
-        ("purge", "Delete messages from a replied message"), ("pin", "Pin a replied message"),
-        ("unpin", "Unpin a message"), ("promote", "Promote a member"), ("demote", "Demote an admin"),
-        ("setwelcome", "Set a custom welcome"), ("welcome", "View or toggle welcome"),
-        ("resetwelcome", "Reset the welcome message"), ("setgoodbye", "Set a custom goodbye"),
-        ("goodbye", "View or toggle goodbye"), ("resetgoodbye", "Reset the goodbye message"),
-        ("setrules", "Set this group's rules"), ("filter", "Add a keyword filter"),
-        ("stop", "Remove a keyword filter"), ("filters", "List this group's filters"),
-        ("save", "Save a group note"), ("get", "Get a group note"), ("notes", "List group notes"),
-        ("antispam", "Toggle duplicate spam protection"), ("antiflood", "Toggle flood protection"),
-        ("antilink", "Toggle link protection"), ("antiforward", "Toggle forward protection"),
-        ("antibot", "Toggle anti-bot joins"), ("lock", "Lock a group feature"),
-        ("unlock", "Unlock a group feature"), ("locks", "Show lock settings"),
-        ("settings", "Show group settings"), ("setdescription", "Change group description"),
-        ("settitle", "Change group title"), ("slowmode", "Set slowmode seconds"),
-    ]
-    return [BotCommand(command=name, description=description) for name, description in commands]
+    return [BotCommand(command=name, description=description) for name, description in group_command_pairs()]
 
 
 def private_commands() -> list[BotCommand]:
-    return [BotCommand(command=name, description=description) for name, description in [
-        ("start", "Start the bot"), ("help", "Show help"), ("about", "About this bot"),
-    ]]
+    return [BotCommand(command=name, description=description) for name, description in PRIVATE_COMMANDS]
 
 
 def owner_commands() -> list[BotCommand]:
-    return [BotCommand(command=name, description=description) for name, description in [
-        ("owner", "Open the owner command list"), ("stats", "View real bot statistics"),
-        ("groups", "List registered groups"), ("users", "View recorded users"),
-        ("broadcast", "Broadcast a replied message"), ("blockgroup", "Block a registered group"),
-        ("unblockgroup", "Unblock a group"), ("leave", "Leave a registered group"),
-        ("restart", "Restart the polling session"), ("maintenance", "Enable maintenance mode"),
-        ("disablemaintenance", "Disable maintenance mode"), ("logs", "Download recent logs"),
-        ("clearcache", "Clear in-memory caches"), ("backup", "Download a SQLite backup"),
-    ]]
+    return [BotCommand(command=name, description=description) for name, description in owner_command_pairs()]
 
 
 async def run_async() -> None:
@@ -111,6 +78,7 @@ async def run_async() -> None:
     await store.connect()
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=None))
+    bot.session.middleware.register(CommandPhotoApiMiddleware(store))
     dp = Dispatcher(storage=MemoryStorage())
     runtime_control = RuntimeControl()
     flood = FloodGuard(limit=7, window_seconds=10.0)
@@ -124,6 +92,9 @@ async def run_async() -> None:
     dp.include_router(extra_router)
     dp.include_router(main_router)
     protection_middleware = GroupProtectionMiddleware()
+    # Command context must wrap the message handler so outgoing text replies can
+    # inherit the shared owner-configured command photo.
+    dp.message.outer_middleware(CommandRequestContextMiddleware())
     dp.message.outer_middleware(protection_middleware)
     dp.workflow_data.update(
         store=store, settings=settings, cooldown=cooldown, flood=flood,
@@ -132,10 +103,19 @@ async def run_async() -> None:
         protection_middleware=protection_middleware,
     )
 
-    await bot.set_my_commands(group_commands(), scope=BotCommandScopeAllGroupChats())
-    await bot.set_my_commands(private_commands(), scope=BotCommandScopeAllPrivateChats())
+    # Command-menu failures must not prevent polling from starting. The
+    # decorated handlers remain available even if Telegram rejects a menu update.
+    menu_updates = [
+        ("group", group_commands(), BotCommandScopeAllGroupChats()),
+        ("private", private_commands(), BotCommandScopeAllPrivateChats()),
+    ]
     for owner_id in settings.owner_ids:
-        await bot.set_my_commands(owner_commands(), scope=BotCommandScopeChat(chat_id=owner_id))
+        menu_updates.append((f"owner {owner_id}", owner_commands(), BotCommandScopeChat(chat_id=owner_id)))
+    for label, commands, scope in menu_updates:
+        try:
+            await bot.set_my_commands(commands, scope=scope)
+        except Exception:
+            log.exception("Could not update %s Telegram command menu; handlers remain registered", label)
     await bot.delete_webhook(drop_pending_updates=True)
 
     app = web.Application()

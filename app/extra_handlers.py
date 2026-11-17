@@ -14,9 +14,14 @@ from pathlib import Path
 from aiogram import F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, ChatPermissions, Message
+from aiogram.types import (
+    BufferedInputFile, CallbackQuery, ChatPermissions, InlineKeyboardButton,
+    InlineKeyboardMarkup, Message,
+)
 
 from .config import Settings
+from .presentation import help_home_text, help_section_text, owner_help_text
+from .keyboards import main_menu
 from .storage import SQLiteStore
 
 log = logging.getLogger(__name__)
@@ -28,7 +33,8 @@ def in_group(message: Message) -> bool:
     return message.chat.type in GROUP_TYPES
 
 
-async def group_admin(message: Message, settings: Settings) -> bool:
+async def group_admin(message: Message, settings: Settings) -> bool | None:
+    """Return None when Telegram could not verify the role (usually bot rights)."""
     if not message.from_user:
         return False
     if message.from_user.id in settings.owner_ids:
@@ -38,14 +44,21 @@ async def group_admin(message: Message, settings: Settings) -> bool:
         return member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
     except Exception as exc:
         log.warning("Could not verify group admin status in %s: %s", message.chat.id, exc)
-        return False
+        return None
 
 
 async def require_group_admin(message: Message, settings: Settings) -> bool:
     if not in_group(message):
         await message.reply("This command can only be used in a group.")
         return False
-    if not await group_admin(message, settings):
+    role = await group_admin(message, settings)
+    if role is None:
+        await message.reply(
+            "⚠️ I couldn't verify your group-admin status. Please promote me to "
+            "administrator in this group, then try again."
+        )
+        return False
+    if not role:
         await message.reply("⛔ Only administrators of this group can use that command.")
         return False
     return True
@@ -72,7 +85,11 @@ async def owner_private(message: Message, settings: Settings) -> bool:
 @router.message(Command("owner"))
 async def owner_command(message: Message, settings: Settings) -> None:
     if await owner_private(message, settings):
-        await message.answer("🍥 ANIFLIX OWNER CONSOLE\n\n/owner · /stats · /groups · /users\n/broadcast · /blockgroup · /unblockgroup · /leave\n/restart · /maintenance · /disablemaintenance\n/logs · /clearcache · /backup")
+        await message.answer(
+            "🍥 <b>ANIFLIX OWNER PANEL</b>\n\nChoose a section using the buttons below.",
+            parse_mode="HTML",
+            reply_markup=main_menu(),
+        )
 
 
 @router.message(Command("users"))
@@ -206,14 +223,100 @@ async def logs_command(message: Message, settings: Settings) -> None:
         await message.answer("⚠️ Could not read the local log file. Render dashboard logs remain available.")
 
 
+def help_home_keyboard(is_owner_private: bool) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="❓ Browse Help", callback_data="help:home")],
+        [InlineKeyboardButton(text="🌐 General", callback_data="help:public"),
+         InlineKeyboardButton(text="🛡 Admin tools", callback_data="help:admin")],
+        [InlineKeyboardButton(text="👋 Welcome & notes", callback_data="help:welcome"),
+         InlineKeyboardButton(text="🔐 Protection", callback_data="help:protection")],
+        [InlineKeyboardButton(text="⚙️ Group settings", callback_data="help:settings")],
+    ]
+    if is_owner_private:
+        rows.append([InlineKeyboardButton(text="👑 Bot owner", callback_data="help:owner")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def help_back_keyboard(is_owner_private: bool) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text="⬅️ Back to help menu", callback_data="help:home")]]
+    if is_owner_private:
+        rows.append([InlineKeyboardButton(text="👑 Bot owner commands", callback_data="help:owner")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 @router.message(Command("start"))
-async def public_start_command(message: Message, settings: Settings) -> None:
-    if in_group(message):
-        await message.answer("🍥 ANIFLIX GROUP MANAGEMENT BOT is active here. Use /help to view commands.")
-    elif message.from_user and message.from_user.id in settings.owner_ids:
-        await message.answer("🍥 ANIFLIX GROUP MANAGEMENT BOT\nUse /owner for global owner controls.")
+async def public_start_command(message: Message, settings: Settings, store: SQLiteStore) -> None:
+    is_owner = bool(message.from_user and message.from_user.id in settings.owner_ids)
+    current = await store.get_settings()
+    text = str(current.get("welcome_message_text") or (
+        "🍥 ANIFLIX GROUP MANAGEMENT BOT\n\n"
+        "Welcome! Use the buttons below to explore the bot.\n"
+        "Add me to your Telegram group to use group-management features.\n\n"
+        "Use /help to browse commands and /about to view bot details."
+    ))
+    markup = help_home_keyboard(is_owner and message.chat.type == ChatType.PRIVATE)
+    photo_id = current.get("welcome_photo_file_id") or ""
+    if photo_id:
+        await message.answer_photo(
+            photo=photo_id,
+            caption=text[:1024],
+            reply_markup=markup,
+        )
+        if len(text) > 1024:
+            await message.answer(text[1024:])
     else:
-        await message.answer("🍥 ANIFLIX GROUP MANAGEMENT BOT\nAdd me to a group and promote me with the permissions you want me to manage.")
+        await message.answer(text, reply_markup=markup)
+
+
+@router.message(Command("help"))
+async def help_command(message: Message, settings: Settings) -> None:
+    is_owner_private = bool(
+        message.chat.type == ChatType.PRIVATE and message.from_user
+        and message.from_user.id in settings.owner_ids
+    )
+    is_owner_group = bool(in_group(message) and settings.owner_group_id == message.chat.id)
+    await message.answer(
+        help_home_text(in_group(message), is_owner_private, is_owner_group),
+        parse_mode="HTML",
+        reply_markup=help_home_keyboard(is_owner_private),
+    )
+
+
+@router.callback_query(F.data.startswith("help:"))
+async def help_category_callback(callback: CallbackQuery, settings: Settings) -> None:
+    if not isinstance(callback.message, Message) or not callback.from_user:
+        await callback.answer("Help menu is unavailable.", show_alert=True)
+        return
+    action = callback.data.split(":", 1)[1]
+    is_owner_private = bool(
+        callback.message.chat.type == ChatType.PRIVATE
+        and callback.from_user.id in settings.owner_ids
+    )
+    if action == "owner" and not is_owner_private:
+        await callback.answer("Owner commands are only available to the bot owner in private chat.", show_alert=True)
+        return
+    if action == "home":
+        is_owner_group = bool(in_group(callback.message) and settings.owner_group_id == callback.message.chat.id)
+        text = help_home_text(in_group(callback.message), is_owner_private, is_owner_group)
+        markup = help_home_keyboard(is_owner_private)
+    elif action == "owner":
+        text = owner_help_text()
+        markup = help_back_keyboard(is_owner_private)
+    else:
+        text = help_section_text(action)
+        if text is None:
+            await callback.answer("Unknown help section.", show_alert=True)
+            return
+        markup = help_back_keyboard(is_owner_private)
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    except Exception as exc:
+        log.debug("Could not edit help message: %s", exc)
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
+    await callback.answer()
 
 
 @router.message(F.left_chat_member)
@@ -526,6 +629,11 @@ async def antiforward_command(message: Message, store: SQLiteStore, settings: Se
 @router.message(Command("antibot"))
 async def antibot_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
     await _toggle(message, store, settings, "anti_bot", "antibot")
+
+
+@router.message(Command("antiraid"))
+async def antiraid_command(message: Message, store: SQLiteStore, settings: Settings) -> None:
+    await _toggle(message, store, settings, "anti_raid", "antiraid")
 
 
 @router.message(Command("locks"))
